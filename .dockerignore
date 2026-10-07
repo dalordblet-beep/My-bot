@@ -1,0 +1,42 @@
+# Never ship secrets, local state or dev tooling into the image.
+.env
+.env.local
+
+# Telethon session (account credentials)
+*.session
+*.session-journal
+
+# Local SQLite database
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+
+# Tooling / editors / logs
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.git/
+.gitignore
+.idea/
+.vscode/
+*.log
+logs/
+
+# Tests are not needed at runtime
+tests/
+requirements-dev.txt
+pytest.ini

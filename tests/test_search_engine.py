@@ -1,0 +1,461 @@
+"""Search wizard engines: masks, premium rating, one-shot finder and battle."""
+
+from __future__ import annotations
+
+import asyncio
+import random
+
+import pytest
+
+from app.config import settings
+from app.search import pattern
+from app.search.battle import CRITERIA, compare, score_side
+from app.search.finder import PREMIUM_FLOOR, SearchCriteria, UsernameFinder
+from app.search.pattern import (
+    build_mask,
+    compile_mask,
+    generate_from_mask,
+    mask_is_usable,
+    premium_rating,
+    rate,
+)
+from app.telegram import username_checker as uc_module
+from app.telegram.username_checker import UsernameChecker
+from tests.mock_telegram import FakePageProbe
+
+
+@pytest.fixture(autouse=True)
+def no_rate_limit(monkeypatch):
+    monkeypatch.setattr(uc_module.shared_rate_limiter, "min_interval", 0.0)
+
+
+# --------------------------------------------------------------------------- masks
+def test_mask_compiles_to_an_anchored_pattern():
+    compiled = compile_mask("??ged")
+    assert compiled is not None
+    assert compiled.match("moged")
+    assert compiled.match("boged")
+    assert not compiled.match("mogedx")
+    assert not compiled.match("mged")
+
+
+def test_mask_supports_digits_and_stars():
+    digits = compile_mask("m#ged")
+    assert digits is not None
+    assert digits.match("m7ged")
+    assert not digits.match("maged")
+
+    star = compile_mask("*dev")
+    assert star is not None
+    assert star.match("mydev")
+    assert star.match("abdev")
+    # Telegram itself rejects names shorter than 5 characters.
+    assert not star.match("dev")
+
+
+def test_bad_masks_are_rejected_not_crashed():
+    for bad in ("", "bad!mask", "UPPER ok", "?? ged"):
+        assert compile_mask(bad) is None
+        assert not mask_is_usable(bad)
+
+
+def test_generated_names_always_match_the_mask():
+    for _ in range(60):
+        name = generate_from_mask("??ged")
+        assert name is not None
+        assert compile_mask("??ged").match(name), name
+        assert pattern.MIN_LENGTH <= len(name) <= pattern.MAX_LENGTH
+        assert not name.startswith("_") and not name.endswith("_")
+
+
+def test_build_mask_respects_length_and_digits():
+    assert build_mask(length=7, allow_digits=False) == "???????"
+    assert "#" in build_mask(length=7, allow_digits=True)
+    assert build_mask(explicit="??ged") == "??ged"
+    assert build_mask(prefix="moged", length=8) == "moged???"
+
+
+# --------------------------------------------------------------------------- rating
+def test_rating_rewards_short_clean_names():
+    # A real word is worth more than a pronounceable coinage of the same shape,
+    # which in turn beats an unpronounceable random string.
+    assert rate("crane").total > rate("moged").total > rate("tyzoc").total
+    # Digits and separators are penalised, in that order.
+    assert rate("moged").total > rate("m0ged").total
+    assert rate("moged").total > rate("mo_ged").total
+
+
+def test_rating_is_bounded_and_explainable():
+    for name in ("abcde", "m" * 32, "a_b_c_d", "12345", ""):
+        rating = rate(name)
+        assert 0 <= rating.total <= 100
+        assert set(rating.parts) == {"length", "word", "spelling", "digits", "separators"}
+        assert rating.total == sum(rating.parts.values())
+
+
+# --------------------------------------------------------------------------- premium
+def test_premium_counts_five_quality_criteria():
+    premium = premium_rating("crane")
+    assert premium.total == sum(
+        (premium.no_digits, premium.no_separators, premium.collectible,
+         premium.readable, premium.dictionary)
+    )
+    # A clean 5-letter dictionary word clears every gate.
+    assert premium.total == 5
+
+
+def test_premium_punishes_digits_and_separators():
+    assert premium_rating("m0ged").no_digits is False
+    assert premium_rating("mo_ged").no_separators is False
+    # A long handle is out of the collectible window but can still be clean.
+    long_clean = premium_rating("mobiledevteam")
+    assert long_clean.collectible is False
+    assert long_clean.no_digits is True
+    assert long_clean.no_separators is True
+
+
+# --------------------------------------------------------------------------- finder
+async def test_finder_screens_with_the_page_before_confirming(bot, monkeypatch):
+    """The free page carries the wide net; MTProto is spent only on survivors."""
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    probe = FakePageProbe(state="free")
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=probe)
+
+    confirms = 0
+    original = checker.confirm_availability
+
+    async def counting(name):
+        nonlocal confirms
+        confirms += 1
+        return await original(name)
+
+    checker.confirm_availability = counting
+
+    class CountingCollectible:
+        calls = 0
+
+        async def check_collectible_username(self, username):
+            CountingCollectible.calls += 1
+            raise AssertionError("collectible must not run in free mode")
+
+    finder = UsernameFinder(checker, CountingCollectible())
+    attempt = await finder.find_one(SearchCriteria(length=8))
+
+    assert attempt.username
+    assert attempt.hit is True
+    assert attempt.basic is not None
+    # The page screened a whole batch for free...
+    assert len(probe.calls) > 1
+    # ...and exactly one scarce MTProto confirmation produced the result.
+    assert confirms == 1
+
+
+async def test_finder_only_returns_premium_candidates(bot, monkeypatch):
+    """There is no user score filter any more - the bot applies its own taste.
+
+    Every name the finder hands back must clear the premium floor, so the N/5
+    verdict shown to the user is never a name that failed the bot's own gate.
+    """
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+    assert attempt.username
+    assert attempt.premium.total >= PREMIUM_FLOOR
+
+
+async def test_finder_never_reports_a_taken_name(bot, monkeypatch):
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="occupied", title="X"))
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=7))
+    # Free mode must never hand back an occupied name - that result is worthless.
+    assert attempt.hit is False
+    assert attempt.username == ""
+    assert attempt.reason in ("all_taken", "no_free_found")
+
+
+async def test_finder_gives_up_gracefully_when_nothing_is_free(bot):
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="occupied"))
+    finder = UsernameFinder(checker, None)
+
+    # The probe says every name is taken, so the search must exhaust its budget
+    # and report honestly instead of returning a taken name.
+    attempt = await finder.find_one(SearchCriteria(length=8))
+    assert attempt.username == ""
+    assert attempt.hit is False
+    assert attempt.reason == "all_taken"
+
+
+async def test_finder_exhausts_its_budget_before_giving_up(bot, monkeypatch):
+    """The regression that made the bot say "checked 1 user and it's taken"."""
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    monkeypatch.setattr(finder_module, "FREE_CONFIRM_BUDGET", 3)
+    # The page cannot rule anything out, so every candidate costs a confirmation.
+    probe = FakePageProbe(state="unknown")
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=probe)
+
+    confirms = 0
+
+    async def occupied(name):
+        nonlocal confirms
+        confirms += 1
+        return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+
+    checker.confirm_availability = occupied
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    # A single lookup is not a search, and the scarce MTProto budget is honoured.
+    assert attempt.username == ""
+    assert attempt.hit is False
+    assert attempt.reason == "all_taken"
+    assert confirms == 3
+
+
+async def test_finder_walks_past_occupied_names_to_find_a_free_one(bot, monkeypatch):
+    """Many taken names in a row must not abort the run."""
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+
+    class NthFreeProbe(FakePageProbe):
+        def __init__(self, free_after: int) -> None:
+            super().__init__(state="occupied")
+            self.free_after = free_after
+
+        async def check(self, username: str):
+            from app.telegram.public_page import FREE, OCCUPIED, PublicPageResult
+
+            self.calls.append(username)
+            if len(self.calls) >= self.free_after:
+                return PublicPageResult(FREE, reason="fake")
+            return PublicPageResult(OCCUPIED, title="Somebody", reason="fake")
+
+    probe = NthFreeProbe(free_after=6)
+    finder = UsernameFinder(UsernameChecker(cache=None, bot=bot, page_probe=probe), None)
+
+    attempt = await finder.find_one(SearchCriteria(length=7))
+
+    assert attempt.hit is True
+    assert attempt.username
+    assert attempt.username == probe.calls[-1]
+    # It really did walk past the occupied ones.
+    assert len(probe.calls) >= 6
+
+
+async def test_finder_reports_unconfirmed_when_nothing_can_be_verified(bot):
+    """UNKNOWN must never be silently reported as "taken" or as "free"."""
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is False
+    assert attempt.username == ""
+    assert attempt.reason == "unconfirmed"
+
+
+async def test_free_result_requires_mtproto_not_just_the_page(bot, monkeypatch):
+    """The core promise: the page alone may never declare a name free.
+
+    The public page renders its "free"-looking signup shape for names it simply
+    cannot preview, so a search that trusted it would hand out taken names -
+    exactly the bug that was reported. Availability must come from MTProto.
+    """
+    monkeypatch.setattr(settings, "allow_bot_api_availability", False)
+    # The page insists the name is free; there is no authoritative channel.
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is False
+    assert attempt.username == ""
+    assert attempt.reason == "unconfirmed"
+
+
+async def test_repeat_search_reuses_verdicts_instead_of_re_probing(bot):
+    """The second identical search must not re-spend anything.
+
+    Telegram quota is the bottleneck, and users press Search repeatedly. A
+    remembered OCCUPIED verdict makes the repeat run free.
+    """
+    probe = FakePageProbe(state="occupied")
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=probe)
+    criteria = SearchCriteria(length=6)
+
+    # The same seed produces the same candidate list both times.
+    await UsernameFinder(checker, None, rng=random.Random(7)).find_one(criteria)
+    first = len(probe.calls)
+    assert first > 0
+
+    await UsernameFinder(checker, None, rng=random.Random(7)).find_one(criteria)
+    second = len(probe.calls) - first
+
+    assert second == 0
+    assert checker.verdicts.hits > 0
+
+
+async def test_finder_aborts_immediately_on_a_long_flood_wait(bot):
+    """A multi-hour FloodWait must not freeze the search screen."""
+    from app.utils.ratelimit import RateLimiter
+
+    limiter = RateLimiter(min_interval=0.0)
+    limiter.pause(20702.0)  # what a real Telegram ban looked like
+    checker = UsernameChecker(
+        cache=None, bot=bot, rate_limiter=limiter, page_probe=FakePageProbe(state="free")
+    )
+    finder = UsernameFinder(checker, None)
+
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=6)), timeout=5
+    )
+
+    # It must answer at once, say it was throttled, and not claim a result.
+    assert attempt.reason == "throttled"
+    assert attempt.hit is False
+    assert attempt.username == ""
+
+
+async def test_finder_aborts_when_throttled_mid_run(bot):
+    """A FloodWait that lands part-way through must stop the run, not sleep it off."""
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    # The page cannot rule names out, so each survivor reaches MTProto.
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+
+    seen = 0
+
+    async def throttling(name):
+        nonlocal seen
+        seen += 1
+        if seen >= 3:
+            return CheckResult(
+                username=name, status=CheckStatus.RATE_LIMITED,
+                source="mtproto", reason="flood_wait",
+            )
+        return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+
+    checker.confirm_availability = throttling
+    finder = UsernameFinder(checker, None)
+
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=7)), timeout=5
+    )
+
+    assert attempt.reason == "throttled"
+    assert attempt.username == ""
+    assert seen == 3
+    assert attempt.generated_tries > 1, "the search gave up without trying"
+
+
+# --------------------------------------------------------------------------- battle
+def test_battle_scores_every_criterion():
+    side = score_side("moged", "taken")
+    assert set(side.scores) == set(CRITERIA)
+    assert side.total == round(sum(side.scores.values()) / len(CRITERIA), 1)
+
+
+def test_battle_short_name_beats_a_long_one():
+    short = score_side("moged", "taken")
+    long = score_side("mogeddevteam", "taken")
+    assert short.total > long.total
+
+
+def test_collectible_status_scores_highest():
+    assert score_side("moged", "collectible").total > score_side("moged", "taken").total
+    assert score_side("moged", "taken").total > score_side("moged", "free").total
+
+
+async def test_compare_picks_a_winner(bot, monkeypatch):
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="occupied"))
+
+    result = await compare("moged", "mogeddevteam", checker, None)
+    assert result is not None
+    assert result.winner == "left"
+    assert result.left.total > result.right.total
+
+
+async def test_compare_rejects_invalid_and_identical(bot):
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    assert await compare("ab", "moged", checker, None) is None
+    assert await compare("moged", "@moged", checker, None) is None
+
+
+# --------------------------------------------------------------------------- fragment double-check
+class _FakeFragment:
+    """Stands in for the Fragment marketplace: lists names matching ``listed_if``."""
+
+    def __init__(self, listed_if):
+        self._listed_if = listed_if
+        self.calls = 0
+
+    async def lookup(self, name):
+        from app.utils.enums import CollectibleStatus
+        from app.utils.results import CollectibleResult
+
+        self.calls += 1
+        if self._listed_if(name):
+            return CollectibleResult(
+                username=name, status=CollectibleStatus.AVAILABLE_FOR_PURCHASE,
+                is_collectible=True, marketplace="Fragment", price="100 TON",
+                source="fragment_web",
+            )
+        return CollectibleResult(
+            username=name, status=CollectibleStatus.NOT_DETECTED,
+            is_collectible=False, reason="not_listed", source="fragment_web",
+        )
+
+
+class _FakeCollectibleChecker:
+    """The double-check's Fragment side, as the finder reaches it."""
+
+    def __init__(self, listed_if):
+        self.fragment = _FakeFragment(listed_if)
+
+
+async def test_finder_rejects_names_listed_on_fragment(bot, monkeypatch):
+    """The second half of the double check: a Fragment listing vetoes a free name."""
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    collectible = _FakeCollectibleChecker(lambda name: True)  # everything is listed
+    finder = UsernameFinder(checker, collectible)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is False
+    assert attempt.username == ""
+    assert attempt.reason == "all_taken"
+    assert collectible.fragment.calls > 0
+
+
+async def test_finder_confirms_fragment_clear_on_a_hit(bot, monkeypatch):
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    collectible = _FakeCollectibleChecker(lambda name: False)  # nothing listed
+    finder = UsernameFinder(checker, collectible)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is True
+    assert attempt.fragment_clear is True
+    assert attempt.fragment_checked is True
+
+
+async def test_finder_says_fragment_was_not_checked_when_marketplace_is_down(bot, monkeypatch):
+    """A dead marketplace must not block a search - but it must not claim a check either."""
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    finder = UsernameFinder(checker, None)  # no marketplace configured
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is True
+    assert attempt.fragment_checked is False

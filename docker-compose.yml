@@ -1,0 +1,59 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: username_scanner_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scanner
+      POSTGRES_PASSWORD: scanner
+      POSTGRES_DB: username_scanner
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scanner -d username_scanner"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: username_scanner_cache
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  bot:
+    build: .
+    container_name: username_scanner_bot
+    restart: unless-stopped
+    # BOT_TOKEN, ADMIN_IDS, REQUIRED_SUBSCRIPTIONS ... come from .env.
+    env_file: .env
+    environment:
+      # Inside the compose network the services are addressed by name.
+      DATABASE_URL: postgresql+asyncpg://scanner:scanner@postgres:5432/username_scanner
+      REDIS_URL: redis://redis:6379/0
+      REDIS_ENABLED: "true"
+      # Keep the Telethon session on a volume so a redeploy does not lose it.
+      MTPROTO_SESSION: /data/username_scanner_session
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - mtproto_session:/data
+
+volumes:
+  pgdata:
+  redisdata:
+  mtproto_session:
