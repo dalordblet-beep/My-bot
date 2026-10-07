@@ -166,21 +166,22 @@ async def test_probe_fails_closed_without_a_network(monkeypatch):
     assert not result.is_free
 
 
-# ------------------------------------------------- MTProto "invalid" means free
-async def test_mtproto_invalid_means_free_for_a_valid_handle(monkeypatch):
-    """Telegram answers USERNAME_INVALID for a handle nobody owns.
+# --------------------------------------------- MTProto "invalid" is never free
+async def test_mtproto_invalid_is_never_a_free_verdict(monkeypatch):
+    """USERNAME_INVALID must never become AVAILABLE - not even for a valid shape.
 
-    Telethon spells the rule out: "Nobody is using this username, or the username
-    is unacceptable. If the latter, it must match r'[a-zA-Z][\\w\\d]{3,30}[a-zA-Z\\d]'".
-    A handle that matches cannot be the latter, so for the names the bot generates
-    INVALID is simply the other way Telegram says "free". Discarding it made the
-    search throw away real, free names - which is why short searches ended with
-    "everything is taken".
-
-    Verified live: `usano`, `pupen`, `bokok`, `kaniro` all raise UsernameInvalidError
-    while rendering no profile card on t.me, and `resolveUsername` does resolve
-    personal accounts (`mogeds2` -> occupied, title "Mogeds"), so a "free" verdict
-    is meaningful.
+    Telethon documents INVALID as "nobody is using this username, or the
+    username is unacceptable", and for a long time the second half was read as
+    "so a shape-valid INVALID means free". Live evidence says otherwise: the
+    account that separates "unowned" from "unassignable" (account.checkUsername)
+    is user-only - BotMethodInvalidError for bots, verified - and Telegram does
+    refuse to hand out shape-valid names it reports INVALID for (``emanim``:
+    resolve says INVALID, no owner anywhere, yet the claim screen answers
+    "username is invalid"). Handing such a name to the user as AVAILABLE is the
+    worst verdict this bot can emit: it sends him to claim a name Telegram will
+    not give him. So INVALID stays INVALID; the search skips it and keeps
+    hunting for USERNAME_NOT_OCCUPIED, the only answer Telegram honours at
+    claim time.
     """
     from telethon.errors import UsernameInvalidError
 
@@ -194,9 +195,8 @@ async def test_mtproto_invalid_means_free_for_a_valid_handle(monkeypatch):
     monkeypatch.setattr(client, "_client", FakeClient(), raising=False)
     monkeypatch.setattr(client, "_ready", True, raising=False)
 
-    # A syntactically valid handle: INVALID can only mean "nobody owns it".
-    free = await client.resolve_username("usano")
-    assert free.kind == "not_occupied"
+    verdict = await client.resolve_username("usano")
+    assert verdict.kind == "invalid"
 
     # A malformed one stays invalid - it could not be registered anyway.
     malformed = await client.resolve_username("ab")

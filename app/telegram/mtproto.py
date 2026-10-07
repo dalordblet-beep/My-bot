@@ -12,7 +12,6 @@ degrades to ``UNKNOWN`` instead of inventing an answer.
 from __future__ import annotations
 
 import asyncio
-import re
 from pathlib import Path
 from typing import Any
 
@@ -21,12 +20,10 @@ from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
-# Telegram's own shape for a username. ``contacts.resolveUsername`` answers
-# USERNAME_INVALID when a handle is *either* nobody's *or* unacceptable, and
-# Telethon documents the rule: "Nobody is using this username, or the username
-# is unacceptable. If the latter, it must match r'[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]'."
-# So for a handle that does match, INVALID can only mean "nobody owns it".
-_VALID_USERNAME_RE = re.compile(r"^[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]$")
+# Telegram's own shape for a username (documented alongside USERNAME_INVALID):
+# r'[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]'. Kept here for reference and diagnostics;
+# the resolver no longer branches on it, because a shape-valid handle can still
+# be unassignable (see resolve_username).
 
 try:  # Telethon is a hard requirement, but import errors must not crash boot.
     from telethon import TelegramClient
@@ -197,14 +194,20 @@ class MtprotoClient:
             except UsernameNotOccupiedError:
                 return MtprotoResult("not_occupied")
             except UsernameInvalidError:
-                # Telegram's other way of saying "free". It answers
-                # USERNAME_INVALID both for a malformed handle and for a valid
-                # handle nobody owns; a handle that matches Telegram's own shape
-                # cannot be the former. Treating this as an error made the
-                # search throw away real, free names - which is why short
-                # searches ended with "everything is taken".
-                if _VALID_USERNAME_RE.match(username or ""):
-                    return MtprotoResult("not_occupied", "invalid_means_free")
+                # Telegram answers USERNAME_INVALID both for a malformed handle
+                # and for a valid-shaped handle it will not hand out: reserved
+                # names, recently released ones still in cooldown, Fragment
+                # stock, patterns its anti-abuse dislikes. The one call that
+                # separates "unowned" from "unassignable" is
+                # account.checkUsername, and it is user-only
+                # (BotMethodInvalidError for bots - verified live), so the two
+                # cases cannot be told apart here. Mapping the valid-shaped ones
+                # to "free" anyway made the search hand out handles Telegram then
+                # rejects with "username is invalid" at claim time - a false
+                # available verdict, the worst thing this bot can emit. So
+                # INVALID is never a free verdict: the search skips it and keeps
+                # hunting for a name Telegram answers USERNAME_NOT_OCCUPIED for,
+                # which is the only signal it honours at claim time.
                 return MtprotoResult("invalid")
             except FloodWaitError as exc:  # pragma: no cover - network dependent
                 return MtprotoResult("flood", str(exc.seconds))
