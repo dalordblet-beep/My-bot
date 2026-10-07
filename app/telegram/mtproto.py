@@ -12,12 +12,20 @@ degrades to ``UNKNOWN`` instead of inventing an answer.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 from app.config import settings
 from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+# Telegram's own shape for a username. ``contacts.resolveUsername`` answers
+# USERNAME_INVALID when a handle is *either* nobody's *or* unacceptable, and
+# Telethon documents the rule: "Nobody is using this username, or the username
+# is unacceptable. If the latter, it must match r'[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]'."
+# So for a handle that does match, INVALID can only mean "nobody owns it".
+_VALID_USERNAME_RE = re.compile(r"^[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]$")
 
 try:  # Telethon is a hard requirement, but import errors must not crash boot.
     from telethon import TelegramClient
@@ -146,6 +154,14 @@ class MtprotoClient:
             except UsernameNotOccupiedError:
                 return MtprotoResult("not_occupied")
             except UsernameInvalidError:
+                # Telegram's other way of saying "free". It answers
+                # USERNAME_INVALID both for a malformed handle and for a valid
+                # handle nobody owns; a handle that matches Telegram's own shape
+                # cannot be the former. Treating this as an error made the
+                # search throw away real, free names - which is why short
+                # searches ended with "everything is taken".
+                if _VALID_USERNAME_RE.match(username or ""):
+                    return MtprotoResult("not_occupied", "invalid_means_free")
                 return MtprotoResult("invalid")
             except FloodWaitError as exc:  # pragma: no cover - network dependent
                 return MtprotoResult("flood", str(exc.seconds))

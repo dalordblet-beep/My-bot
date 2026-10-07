@@ -164,3 +164,40 @@ async def test_probe_fails_closed_without_a_network(monkeypatch):
 
     assert result.state == UNKNOWN
     assert not result.is_free
+
+
+# ------------------------------------------------- MTProto "invalid" means free
+async def test_mtproto_invalid_means_free_for_a_valid_handle(monkeypatch):
+    """Telegram answers USERNAME_INVALID for a handle nobody owns.
+
+    Telethon spells the rule out: "Nobody is using this username, or the username
+    is unacceptable. If the latter, it must match r'[a-zA-Z][\\w\\d]{3,30}[a-zA-Z\\d]'".
+    A handle that matches cannot be the latter, so for the names the bot generates
+    INVALID is simply the other way Telegram says "free". Discarding it made the
+    search throw away real, free names - which is why short searches ended with
+    "everything is taken".
+
+    Verified live: `usano`, `pupen`, `bokok`, `kaniro` all raise UsernameInvalidError
+    while rendering no profile card on t.me, and `resolveUsername` does resolve
+    personal accounts (`mogeds2` -> occupied, title "Mogeds"), so a "free" verdict
+    is meaningful.
+    """
+    from telethon.errors import UsernameInvalidError
+
+    from app.telegram import mtproto as mtproto_module
+
+    class FakeClient:
+        async def __call__(self, request):
+            raise UsernameInvalidError(request=None)
+
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(client, "_client", FakeClient(), raising=False)
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+
+    # A syntactically valid handle: INVALID can only mean "nobody owns it".
+    free = await client.resolve_username("usano")
+    assert free.kind == "not_occupied"
+
+    # A malformed one stays invalid - it could not be registered anyway.
+    malformed = await client.resolve_username("ab")
+    assert malformed.kind == "invalid"

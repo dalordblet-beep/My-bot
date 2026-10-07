@@ -562,7 +562,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-306 tests. The suite drives the real dispatcher, middlewares, routers and
+307 tests. The suite drives the real dispatcher, middlewares, routers and
 keyboards against a fake Telegram session — no network, no token. It covers the
 full onboarding flow (including wrong, expired and exhausted CAPTCHAs),
 access-guard bypass attempts, bans, temporary restrictions, the three check
@@ -689,6 +689,17 @@ cannot resolve usernames owned by personal accounts at all and answers "chat not
 found" for them, which is indistinguishable from free. The public preview page
 is therefore used as an independent confirmation, and only a confirmed-free name
 may be reported as AVAILABLE (and only with `ALLOW_BOT_API_AVAILABILITY=true`).
+
+**Telegram has two ways of saying "free".** `contacts.resolveUsername` raises
+`USERNAME_NOT_OCCUPIED` for a handle nobody owns — and also `USERNAME_INVALID`,
+which Telethon documents as *"Nobody is using this username, or the username is
+unacceptable. If the latter, it must match `[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]`"*.
+A handle that matches that shape cannot be the latter, so for the names the bot
+generates `USERNAME_INVALID` is simply the other way Telegram says "free".
+Treating it as an error made the search discard real, free names — which is why
+short searches ended with "everything is taken". `USERNAME_NOT_OCCUPIED` and
+`USERNAME_INVALID` (for a valid handle) both map to AVAILABLE; a genuinely
+malformed handle still maps to INVALID and is skipped.
 
 **Callbacks are not trusted.** Every callback re-runs `AccessGuard` against the
 database. Stale buttons, forged admin payloads and direct `/check` calls are all
