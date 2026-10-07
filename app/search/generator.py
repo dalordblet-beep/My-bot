@@ -366,6 +366,44 @@ def _valuable_stream(
                     yield joined
 
 
+def coinage_candidates(
+    *,
+    length: int | None = None,
+    allow_digits: bool = False,
+    min_score: int = 0,
+    rng: random.Random | None = None,
+    limit: int = 400,
+) -> Iterator[str]:
+    """Pure pronounceable coinages - the stream that makes a free name certain.
+
+    ``beautiful_candidates`` interleaves these with real words so a search has
+    something desirable to offer first. This is the same generator standing on
+    its own: an effectively unlimited supply of clean, readable names that are
+    almost never registered.
+
+    The finder's guarantee pass uses it: once the desirable real-word stream has
+    had its chance, a search given a length and a digit preference keeps going
+    here until it lands a genuinely free name, instead of stopping at "all
+    taken". Every emitted name clears the same length / digit / score gates as
+    any other candidate, so the guarantee cannot produce a name the bot would
+    otherwise have rejected.
+    """
+    rng = rng or random.Random()
+    emitted = 0
+    seen: set[str] = set()
+    while emitted < limit:
+        name = _coinage(rng, length or 6)
+        if name in seen:
+            continue
+        seen.add(name)
+        if not _fits(name, length, allow_digits):
+            continue
+        if rate(name).total < min_score:
+            continue
+        emitted += 1
+        yield name
+
+
 def _coinage_stream(length: int | None, rng: random.Random, limit: int) -> Iterator[str]:
     """Readable coinages - the stream that actually guarantees a free name.
 

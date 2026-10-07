@@ -25,9 +25,14 @@ from __future__ import annotations
 import asyncio
 import random
 from dataclasses import asdict, dataclass
+from typing import Iterator
 
 from app.collectible.checker import CollectibleChecker
-from app.search.generator import UsernameGenerator, beautiful_candidates
+from app.search.generator import (
+    UsernameGenerator,
+    beautiful_candidates,
+    coinage_candidates,
+)
 from app.search.pattern import (
     Premium,
     compile_mask,
@@ -77,11 +82,18 @@ SCREEN_CAP = 160
 # How many public pages to fetch at once. Kept modest on purpose: we are guests
 # on a public endpoint, and a burst invites a 429 for no real gain.
 SCREEN_BATCH = 6
-# How many *authoritative* MTProto confirmations one search may spend. This is
-# the scarce resource - Telegram escalates at roughly 20-30 resolves per account
-# per minute (production evidence via telethon-floodgate), and every call is
-# paced by REQUEST_DELAY. 8 calls at a safe 3s interval is ~24s worst case.
-FREE_CONFIRM_BUDGET = 8
+# How many *authoritative* MTProto confirmations one search may spend in total.
+# This is the scarce resource - Telegram escalates at roughly 20-30 resolves per
+# account per minute (production evidence via telethon-floodgate), and every
+# call is paced by REQUEST_DELAY. 10 calls at a safe 3s interval is ~30s worst
+# case, which still stays under the escalation threshold.
+FREE_CONFIRM_BUDGET = 10
+# How much of that total the desirable real-word stream may claim before the
+# guarantee pass takes over. Real words are what a user actually wants, so they
+# get first refusal - but they are also almost all taken, so they must not be
+# allowed to burn the whole budget and end the search with "everything taken".
+# The remainder is reserved for the coinage guarantee.
+VALUABLE_CONFIRM_BUDGET = 5
 # If a FloodWait is longer than this, do not sit on it: a search the user is
 # waiting on must answer now and say "Telegram is throttling us", not hang.
 # A multi-minute wait is not a search, it is a stuck screen.
@@ -104,6 +116,23 @@ class SearchCriteria:
         the search screen after the first one.
         """
         return asdict(self)
+
+
+@dataclass
+class _SweepState:
+    """Mutable counters shared by every pass of one search.
+
+    ``confirmations`` in particular is shared, so the valuable pass and the
+    guarantee pass draw on a single MTProto allowance rather than each spending
+    their own.
+    """
+
+    screened: int = 0
+    confirmations: int = 0
+    occupied_seen: int = 0
+    unknown_seen: int = 0
+    best: str | None = None
+    best_premium: Premium | None = None
 
 
 @dataclass
@@ -232,6 +261,111 @@ class UsernameFinder:
             return True, True
         return True, False
 
+    def _guarantee_candidates(self, criteria: SearchCriteria) -> Iterator[str]:
+        """The guarantee stream: clean coinages that fit the user's criteria.
+
+        Real words are what a user wants and almost all of them are taken. These
+        are the opposite trade - invented, but readable, and effectively never
+        registered - so the search can always end on a free name. They go through
+        the identical length / digit / score / premium gates, so the guarantee
+        never hands back a name the bot's own taste would have rejected.
+        """
+        for name in coinage_candidates(
+            length=criteria.length,
+            allow_digits=criteria.allow_digits,
+            min_score=QUALITY_FLOOR,
+            rng=self._rng,
+            limit=MAX_GENERATION_TRIES * 4,
+        ):
+            if premium_rating(name).total >= PREMIUM_FLOOR:
+                yield name
+
+    async def _sweep(
+        self, candidates: Iterator[str], budget: int, state: _SweepState
+    ) -> FindAttempt | None:
+        """Screen and confirm candidates until one is free or the budget is spent.
+
+        Returns a :class:`FindAttempt` only when the run must stop for a reason
+        the user needs to hear about - a confirmed free name, or a throttle.
+        ``None`` means "budget spent on this stream, carry on with the next one".
+
+        ``budget`` is a ceiling on ``state.confirmations``, so several sweeps in
+        one search share a single MTProto allowance instead of each taking their
+        own.
+        """
+        while state.screened < SCREEN_CAP and state.confirmations < budget:
+            batch: list[str] = []
+            for name in candidates:
+                batch.append(name)
+                if len(batch) >= SCREEN_BATCH:
+                    break
+            if not batch:
+                return None  # this stream is exhausted
+
+            # Remember the best-looking candidate so a total miss can still be
+            # explained ("everything this good is taken") rather than blank.
+            for name in batch:
+                premium = premium_rating(name)
+                if state.best_premium is None or premium.total > state.best_premium.total:
+                    state.best, state.best_premium = name, premium
+
+            survivors = await self._screen(batch)
+            state.screened += len(batch)
+            state.occupied_seen += len(batch) - len(survivors)
+
+            for name in survivors:
+                if state.confirmations >= budget:
+                    break
+
+                basic = await self._checker.confirm_availability(name)
+                state.confirmations += 1
+
+                if basic.status is CheckStatus.AVAILABLE:
+                    # Telegram is done - now Fragment gets its say.
+                    fragment_clear, fragment_checked = await self._fragment_verdict(name)
+                    if not fragment_clear:
+                        # Listed for auction/sale on Fragment: not claimable.
+                        state.occupied_seen += 1
+                        continue
+                    return FindAttempt(
+                        username=name,
+                        premium=premium_rating(name),
+                        hit=True,
+                        reason="free_found",
+                        basic=basic,
+                        generated_tries=state.screened,
+                        value=estimate_value(name),
+                        fragment_clear=fragment_clear,
+                        fragment_checked=fragment_checked,
+                    )
+
+                if basic.status is CheckStatus.OCCUPIED:
+                    state.occupied_seen += 1
+                elif basic.status is CheckStatus.RATE_LIMITED:
+                    # Telegram started throttling mid-run. Do not burn the rest
+                    # of the budget sleeping - report a throttle, not "taken".
+                    logger.warning(
+                        "search stopped after %d candidates: flood wait hit",
+                        state.screened,
+                    )
+                    return FindAttempt(
+                        username="",
+                        premium=state.best_premium or premium_rating(""),
+                        hit=False,
+                        reason="throttled",
+                        generated_tries=state.screened,
+                        value=estimate_value(state.best) if state.best else None,
+                    )
+                elif basic.status is CheckStatus.INVALID:
+                    # Cannot be claimed either way - skip it silently.
+                    continue
+                else:
+                    # UNKNOWN. Not a "taken" verdict - the channel simply could
+                    # not confirm. Counted separately so the message stays honest.
+                    state.unknown_seen += 1
+
+        return None
+
     async def _find_free(self, criteria: SearchCriteria) -> FindAttempt:
         """Walk candidates until one survives **both** checks.
 
@@ -242,21 +376,27 @@ class UsernameFinder:
           most candidates are in fact taken, so this removes them cheaply;
         * **MTProto** confirms the survivors, because it is the only channel that
           can truthfully declare a name AVAILABLE. Telegram rate-limits it hard,
-          so it is budgeted separately and never spent on a name the page has
-          already killed;
+          so it is budgeted and never spent on a name the page has killed;
         * **Fragment** gets the final word on the survivors: a name listed for
           auction or sale there is rejected and the hunt continues.
 
-        A success is therefore a real, MTProto-confirmed free name that Fragment
-        does not list - and an inconclusive run says so instead of dressing up
-        an occupied name.
+        The run is **two passes over one shared confirmation budget**:
+
+        1. the *valuable* pass - real words, brands and hybrids, the names a user
+           actually wants - claiming up to ``VALUABLE_CONFIRM_BUDGET``
+           confirmations;
+        2. the *guarantee* pass - clean coinages, which are effectively never
+           registered - spending whatever is left of ``FREE_CONFIRM_BUDGET``.
+
+        That ordering is what makes a search answer with a free name rather than
+        "everything is taken": real words get first refusal because they are
+        better, but they cannot consume the whole budget, and the coinage stream
+        is an inexhaustible supply of names that clear every one of the bot's own
+        gates. A success is therefore a real, MTProto-confirmed free name that
+        Fragment does not list - and an inconclusive run says so instead of
+        dressing up an occupied name.
         """
-        screened = 0
-        confirmations = 0
-        occupied_seen = 0
-        unknown_seen = 0
-        best: str | None = None
-        best_premium: Premium | None = None
+        state = _SweepState()
 
         # If Telegram has already thrown a long FloodWait at us, a search cannot
         # be carried out right now. Say so immediately instead of hanging on the
@@ -269,80 +409,20 @@ class UsernameFinder:
                 reason="throttled", generated_tries=0,
             )
 
-        candidates = self._candidates(criteria)
+        # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
+        valuable_budget = min(VALUABLE_CONFIRM_BUDGET, FREE_CONFIRM_BUDGET)
+        stopped = await self._sweep(self._candidates(criteria), valuable_budget, state)
+        if stopped is not None:
+            return stopped
 
-        while screened < SCREEN_CAP:
-            batch: list[str] = []
-            for name in candidates:
-                batch.append(name)
-                if len(batch) >= SCREEN_BATCH:
-                    break
-            if not batch:
-                break
-
-            # Remember the best-looking candidate so a total miss can still be
-            # explained ("everything this good is taken") rather than blank.
-            for name in batch:
-                premium = premium_rating(name)
-                if best_premium is None or premium.total > best_premium.total:
-                    best, best_premium = name, premium
-
-            survivors = await self._screen(batch)
-            screened += len(batch)
-            occupied_seen += len(batch) - len(survivors)
-
-            for name in survivors:
-                if confirmations >= FREE_CONFIRM_BUDGET:
-                    break
-
-                basic = await self._checker.confirm_availability(name)
-                confirmations += 1
-
-                if basic.status is CheckStatus.AVAILABLE:
-                    # Telegram is done - now Fragment gets its say.
-                    fragment_clear, fragment_checked = await self._fragment_verdict(name)
-                    if not fragment_clear:
-                        # Listed for auction/sale on Fragment: not claimable.
-                        occupied_seen += 1
-                        continue
-                    return FindAttempt(
-                        username=name,
-                        premium=premium_rating(name),
-                        hit=True,
-                        reason="free_found",
-                        basic=basic,
-                        generated_tries=screened,
-                        value=estimate_value(name),
-                        fragment_clear=fragment_clear,
-                        fragment_checked=fragment_checked,
-                    )
-
-                if basic.status is CheckStatus.OCCUPIED:
-                    occupied_seen += 1
-                elif basic.status is CheckStatus.RATE_LIMITED:
-                    # Telegram started throttling mid-run. Do not burn the rest
-                    # of the budget sleeping - report a throttle, not "taken".
-                    logger.warning(
-                        "search stopped after %d candidates: flood wait hit", screened
-                    )
-                    return FindAttempt(
-                        username="",
-                        premium=best_premium or premium_rating(""),
-                        hit=False,
-                        reason="throttled",
-                        generated_tries=screened,
-                        value=estimate_value(best) if best else None,
-                    )
-                elif basic.status is CheckStatus.INVALID:
-                    # Cannot be claimed either way - skip it silently.
-                    continue
-                else:
-                    # UNKNOWN. Not a "taken" verdict - the channel simply could
-                    # not confirm. Counted separately so the message stays honest.
-                    unknown_seen += 1
-
-            if confirmations >= FREE_CONFIRM_BUDGET:
-                break
+        # Pass 2: the guarantee. Whatever budget is left goes to the stream that
+        # is effectively always free, so the search ends on a name, not an excuse.
+        if state.confirmations < FREE_CONFIRM_BUDGET:
+            stopped = await self._sweep(
+                self._guarantee_candidates(criteria), FREE_CONFIRM_BUDGET, state
+            )
+            if stopped is not None:
+                return stopped
 
         # Nothing free within the budget. Report honestly why the search stopped
         # - and never present an occupied name as a successful result.
@@ -352,32 +432,32 @@ class UsernameFinder:
         # user needs to hear ("verification did not work"), not "everything is
         # taken" - the latter would hide a broken MTProto session behind a false
         # verdict about the names.
-        if unknown_seen:
+        if state.unknown_seen:
             return FindAttempt(
                 username="",
-                premium=best_premium or premium_rating(""),
+                premium=state.best_premium or premium_rating(""),
                 hit=False,
                 reason="unconfirmed",
-                generated_tries=screened,
-                value=estimate_value(best) if best else None,
+                generated_tries=state.screened,
+                value=estimate_value(state.best) if state.best else None,
             )
 
-        if occupied_seen:
+        if state.occupied_seen:
             return FindAttempt(
                 username="",
-                premium=best_premium or premium_rating(""),
+                premium=state.best_premium or premium_rating(""),
                 hit=False,
                 reason="all_taken",
-                generated_tries=screened,
-                value=estimate_value(best) if best else None,
+                generated_tries=state.screened,
+                value=estimate_value(state.best) if state.best else None,
             )
 
         return FindAttempt(
             username="",
             premium=premium_rating(""),
             hit=False,
-            reason="no_candidate" if best is None else "no_free_found",
-            generated_tries=screened,
+            reason="no_candidate" if state.best is None else "no_free_found",
+            generated_tries=state.screened,
         )
 
     # ------------------------------------------------------------------ variants

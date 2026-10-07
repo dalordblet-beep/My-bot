@@ -248,6 +248,76 @@ async def test_finder_walks_past_occupied_names_to_find_a_free_one(bot, monkeypa
     assert len(probe.calls) >= 6
 
 
+async def test_guarantee_pass_finds_a_free_name_when_real_words_are_taken(bot, monkeypatch):
+    """The promise the product rests on: a search given a length and a digit
+    preference ends with a genuinely free name, not "everything is taken".
+
+    Real dictionary words are almost all registered, so the valuable pass is
+    allowed to fail on them - the guarantee pass then leans on the coinage
+    stream, which is effectively never registered, and lands a name that still
+    clears every one of the bot's own gates.
+    """
+    from app.search.pattern import _WORD_SET
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+
+    async def words_taken(name: str) -> CheckResult:
+        if name in _WORD_SET:
+            return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
+
+    checker.confirm_availability = words_taken
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is True
+    assert attempt.reason == "free_found"
+    assert attempt.username
+    assert attempt.username not in _WORD_SET
+    # The name is not a consolation prize - it cleared the bot's own gates.
+    assert attempt.premium.total >= PREMIUM_FLOOR
+
+
+async def test_guarantee_pass_runs_after_the_valuable_pass_exhausts_its_share(bot, monkeypatch):
+    """The valuable stream gets first refusal but cannot consume the budget.
+
+    With the valuable pass capped at two confirmations and the first four names
+    occupied, only a second pass over the coinage stream can reach the free one -
+    so a hit here proves the two-pass structure, not just a lucky candidate.
+    """
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    monkeypatch.setattr(finder_module, "VALUABLE_CONFIRM_BUDGET", 2)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+
+    confirmations = 0
+
+    async def taken_four_times(name: str) -> CheckResult:
+        nonlocal confirmations
+        confirmations += 1
+        if confirmations <= 4:
+            return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
+
+    checker.confirm_availability = taken_four_times
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=6))
+
+    assert attempt.hit is True
+    assert attempt.reason == "free_found"
+    # Two passes really ran: the valuable pass stopped at its cap and the
+    # guarantee pass carried on past it.
+    assert confirmations > 2
+
+
 async def test_finder_reports_unconfirmed_when_nothing_can_be_verified(bot):
     """UNKNOWN must never be silently reported as "taken" or as "free"."""
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
