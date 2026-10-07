@@ -51,7 +51,13 @@ async def main() -> int:
     )
 
     print(f"Session file: {settings.mtproto_session}.session")
-    print("Follow the prompts. Telegram will send you a login code.\n")
+    print(
+        "When asked for a phone number, enter it WITH the country code "
+        "(e.g. +79991234567).\n"
+        "Do NOT paste a bot token: that authorises a BOT, and Telegram blocks\n"
+        "the dedicated account.checkUsername method for bots.\n"
+        "The login code arrives inside the Telegram app, not by SMS.\n"
+    )
 
     await client.start()
     me = await client.get_me()
@@ -63,7 +69,17 @@ async def main() -> int:
 
     username = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
     print(f"\nAuthorised as {me.first_name or ''} {username} (id={me.id})")
-    print("You can now start the bot: python -m app.main")
+
+    if getattr(me, "bot", False):
+        print(
+            "\n[!] That session is a BOT, not a user account.\n"
+            "    Availability checks still work through contacts.resolveUsername,\n"
+            "    but account.checkUsername is user-only and stays unavailable.\n"
+            "    For a full user session: delete the .session file and run this\n"
+            "    script again, entering your PHONE NUMBER instead of a bot token."
+        )
+    else:
+        print("You can now start the bot: python -m app.main")
 
     await client.disconnect()
     return 0
