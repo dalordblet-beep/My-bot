@@ -1,4 +1,4 @@
-"""Create an authorised MTProto (Telethon) session.
+"""Create (or replace) an authorised MTProto (Telethon) session.
 
 Why you need this
 -----------------
@@ -8,7 +8,9 @@ a definitive AVAILABLE answer possible.
 
 Usage
 -----
-    python scripts/login_mtproto.py
+    python scripts/login_mtproto.py            # log in if needed (no prompts when a session exists)
+    python scripts/login_mtproto.py --force    # delete the session and log in again
+    python scripts/login_mtproto.py --status   # just show which account the session belongs to
 
 You will be asked for the phone number of the account and the login code.
 The resulting ``*.session`` file is written next to the project root and must
@@ -17,6 +19,7 @@ never be committed (it is already in .gitignore).
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 from pathlib import Path
@@ -29,7 +32,47 @@ from app.utils.logging_setup import get_logger, setup_logging  # noqa: E402
 logger = get_logger("login_mtproto")
 
 
-async def main() -> int:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Authorise the MTProto session used for availability checks.",
+    )
+    parser.add_argument(
+        "--force", "--relogin", "--new",
+        dest="force", action="store_true",
+        help="delete the existing session file first, so Telegram asks again",
+    )
+    parser.add_argument(
+        "--status", action="store_true",
+        help="print the account the current session belongs to and exit",
+    )
+    return parser.parse_args(argv)
+
+
+def session_paths() -> list[Path]:
+    """Telethon writes ``<name>.session`` plus a transient ``-journal`` file."""
+    base = settings.mtproto_session
+    return [Path(f"{base}.session"), Path(f"{base}.session-journal")]
+
+
+def remove_session() -> list[str]:
+    removed: list[str] = []
+    for path in session_paths():
+        try:
+            if path.exists():
+                path.unlink()
+                removed.append(path.name)
+        except OSError as exc:  # pragma: no cover - filesystem dependent
+            print(f"Could not remove {path.name}: {exc}")
+    return removed
+
+
+def describe(me) -> str:
+    username = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
+    return f"{me.first_name or ''} {username} (id={me.id})".strip()
+
+
+async def main(argv: list[str] | None = None) -> int:
+    args = parse_args(argv)
     setup_logging("INFO")
 
     if not settings.mtproto_configured:
@@ -45,6 +88,48 @@ async def main() -> int:
     except ImportError:
         print("Telethon is not installed. Run: pip install -r requirements.txt")
         return 3
+
+    if args.status:
+        client = TelegramClient(
+            settings.mtproto_session, settings.api_id, settings.api_hash
+        )
+        await client.connect()
+        try:
+            if not await client.is_user_authorized():
+                print("No authorised session found.")
+                return 1
+            me = await client.get_me()
+            print(f"Session: {settings.mtproto_session}.session")
+            print(f"Authorised as {describe(me)}")
+            if getattr(me, "bot", False):
+                print(
+                    "This is a BOT session: availability checks work through\n"
+                    "contacts.resolveUsername, but account.checkUsername is\n"
+                    "user-only and unavailable. Re-login with --force and a\n"
+                    "PHONE NUMBER for a full user session."
+                )
+        finally:
+            await client.disconnect()
+        return 0
+
+    if args.force:
+        removed = remove_session()
+        if removed:
+            print(f"Removed old session: {', '.join(removed)}")
+            print("Telegram will ask for the phone number and code again.\n")
+        else:
+            print("No existing session to remove - starting a fresh login.\n")
+    else:
+        existing = [path.name for path in session_paths() if path.exists()]
+        if existing:
+            print(
+                "A session already exists, so Telegram will NOT ask again:\n"
+                f"  {', '.join(existing)}\n\n"
+                "To log in as a different account, run:\n"
+                "  python scripts/login_mtproto.py --force\n"
+                "To see which account it belongs to:\n"
+                "  python scripts/login_mtproto.py --status\n"
+            )
 
     client = TelegramClient(
         settings.mtproto_session, settings.api_id, settings.api_hash
@@ -67,16 +152,15 @@ async def main() -> int:
         await client.disconnect()
         return 4
 
-    username = f"@{me.username}" if getattr(me, "username", None) else "(no username)"
-    print(f"\nAuthorised as {me.first_name or ''} {username} (id={me.id})")
+    print(f"\nAuthorised as {describe(me)}")
 
     if getattr(me, "bot", False):
         print(
             "\n[!] That session is a BOT, not a user account.\n"
             "    Availability checks still work through contacts.resolveUsername,\n"
             "    but account.checkUsername is user-only and stays unavailable.\n"
-            "    For a full user session: delete the .session file and run this\n"
-            "    script again, entering your PHONE NUMBER instead of a bot token."
+            "    For a full user session: run this script with --force and enter\n"
+            "    your PHONE NUMBER instead of a bot token."
         )
     else:
         print("You can now start the bot: python -m app.main")

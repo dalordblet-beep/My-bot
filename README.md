@@ -25,15 +25,29 @@ The bot waits for the Postgres and Redis healthchecks. Its database lives on the
 `pgdata` volume and the MTProto session on the `mtproto_session` volume, so
 `docker compose up -d --build` after a code update keeps both.
 
-The MTProto login is interactive, so it is done **once** inside the container:
+The MTProto login is interactive, so it is done inside the container:
 
 ```bash
-docker compose run --rm bot python scripts/login_mtproto.py
+docker compose run --rm -it bot python scripts/login_mtproto.py --force
 ```
 
-Without a session the bot still runs; availability is then only as good as the
-Bot API (see §11). To run without Docker: `pip install -r requirements.txt`,
-fill `.env`, then `python -m app.main` (or `start.bat` on Windows).
+`--force` deletes the session first, so Telegram asks for the phone number and
+the code again. Without it the script does nothing when a session already
+exists — Telethon never re-prompts on an authorised session.
+
+To see which account the current session belongs to (and whether it is a bot):
+
+```bash
+docker compose run --rm bot python scripts/login_mtproto.py --status
+```
+
+Same flags on Windows: `login.bat` asks whether to replace the existing session
+and then runs the script with `--force`. Enter the **phone number** with the
+country code — pasting a bot token authorises a bot, and bots cannot call
+`account.checkUsername`. Without a session the bot still runs; availability is
+then only as good as the Bot API (see §11). To run without Docker:
+`pip install -r requirements.txt`, fill `.env`, then `python -m app.main`
+(or `start.bat` on Windows).
 
 > The bot uses **long polling**: it needs **no open inbound port and no domain** —
 > only outbound HTTPS to `api.telegram.org`.
@@ -610,7 +624,7 @@ username_scanner/
 │   └── main.py
 ├── start.bat                  launcher (start.bat verify runs the doctor)
 ├── login.bat                  one-time MTProto login
-├── scripts/login_mtproto.py   one-time phone login for MTProto
+├── scripts/login_mtproto.py   phone login for MTProto (--force to redo, --status to inspect)
 ├── scripts/find_emoji.py      resolve + verify custom emoji ids
 ├── scripts/list_ids.py        prints every ID you need for .env
 ├── scripts/verify_setup.py    checks the whole .env before you start

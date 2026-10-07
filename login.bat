@@ -1,7 +1,7 @@
 @echo off
 setlocal
 chcp 65001 >nul 2>nul
-title username_scanner - MTProto login (one time)
+title username_scanner - MTProto login
 cd /d "%~dp0"
 
 set "PYTHONIOENCODING=utf-8"
@@ -9,7 +9,7 @@ set "PYTHONUTF8=1"
 
 echo.
 echo  ============================================================
-echo   MTProto login  -  ONE TIME SETUP
+echo   MTProto login  -  authorise the checking account
 echo  ============================================================
 echo.
 echo   This authorises a Telegram *user* session for the bot.
@@ -22,6 +22,7 @@ echo   You will need:
 echo     - the phone number of the account you want to use
 echo     - the login code Telegram sends you inside the app
 echo.
+echo   Enter the PHONE NUMBER, not a bot token.
 echo   The session file stays on this machine and is never uploaded.
 echo.
 
@@ -60,10 +61,34 @@ if errorlevel 1 (
     )
 )
 
-rem --------------------------------------------------------------- login
+rem --------------------------------------------------------------- relogin?
+rem An existing session makes Telethon skip every prompt, so this is where the
+rem user decides: replace it, or keep it and just look at it.
+if not exist "username_scanner_session.session" goto dologin
+
+echo  [!] A session already exists:
+echo        username_scanner_session.session
+echo.
+echo      Telegram will NOT ask for a code while it is present.
+echo      Logging in again REPLACES it.
+echo.
+"%PY%" scripts\login_mtproto.py --status
+echo.
+set /p "RELOGIN=  Re-login with another account now? [y/N] "
+if /i "%RELOGIN%"=="y" goto dologin
+
+echo.
+echo  [i] Keeping the existing session. Nothing was changed.
+echo      Run this file again and answer "y" to replace it.
+echo.
+pause
+exit /b 0
+
+:dologin
+echo.
 echo  [i] Starting login. Answer the prompts below.
 echo.
-"%PY%" scripts\login_mtproto.py
+"%PY%" scripts\login_mtproto.py --force
 set "RC=%ERRORLEVEL%"
 
 echo.
