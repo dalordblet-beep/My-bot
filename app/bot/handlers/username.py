@@ -8,8 +8,11 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from dataclasses import dataclass
+
 from app.bot import texts
 from app.bot.keyboards import callbacks as cb
+from app.bot.keyboards.features_kb import occupied_result_keyboard
 from app.bot.keyboards.main_menu import back_to_menu_keyboard, main_menu_keyboard
 from app.bot.states.states import UsernameStates
 from app.collectible.checker import CollectibleChecker
@@ -19,7 +22,7 @@ from app.services import user as user_service
 from app.services.emoji import emoji
 from app.services.i18n import t
 from app.telegram.username_checker import UsernameChecker
-from app.utils.enums import UsernameType
+from app.utils.enums import CheckStatus, UsernameType
 from app.utils.logging_setup import get_logger
 from app.utils.results import CheckResult, CollectibleResult
 
@@ -58,6 +61,18 @@ def prompt_text(lang: str, mode: str) -> str:
     return table.get(lang, table["en"])
 
 
+@dataclass
+class CheckOutcome:
+    """The result of ``perform_check``: the rendered message and the basic
+    check's status/username, so the reply layer can attach an action keyboard
+    (notably "Find similar" for occupied names) without paying for another
+    Telegram round-trip."""
+
+    text: str
+    basic_status: CheckStatus | None
+    basic_username: str | None
+
+
 async def perform_check(
     session: AsyncSession,
     user: User,
@@ -66,8 +81,10 @@ async def perform_check(
     target: str,
     mode: str,
     lang: str,
-) -> str:
-    """Run the requested mode and return the rendered message."""
+) -> CheckOutcome:
+    """Run the requested mode and return the rendered message plus the basic
+    check's status, so the reply layer can attach an action keyboard without
+    re-running the lookup (and burning Telegram quota twice)."""
     basic: CheckResult | None = None
     collectible: CollectibleResult | None = None
 
@@ -97,12 +114,26 @@ async def perform_check(
     await repo.increment_search_count(session, user)
 
     if mode == MODE_COLLECTIBLE and collectible is not None:
-        return texts.collectible_result(lang, collectible)
+        return CheckOutcome(
+            text=texts.collectible_result(lang, collectible),
+            basic_status=None,
+            basic_username=None,
+        )
     if mode == MODE_ALL_IN_ONE and basic is not None:
-        return texts.all_in_one_result(lang, basic, collectible)
+        return CheckOutcome(
+            text=texts.all_in_one_result(lang, basic, collectible),
+            basic_status=basic.status,
+            basic_username=basic.username,
+        )
     if basic is not None:
-        return texts.basic_result(lang, basic)
-    return texts.error_screen(lang)
+        return CheckOutcome(
+            text=texts.basic_result(lang, basic),
+            basic_status=basic.status,
+            basic_username=basic.username,
+        )
+    return CheckOutcome(
+        text=texts.error_screen(lang), basic_status=None, basic_username=None
+    )
 
 
 async def _prompt(message: Message, state: FSMContext, mode: str, lang: str) -> None:
@@ -207,15 +238,30 @@ async def run_and_reply(
     placeholder = await message.answer(
         f"{emoji.plain('search')} <b>{texts.esc(target)}</b>"
     )
+
     try:
-        rendered = await perform_check(
+        outcome = await perform_check(
             session, user, checker, collectible_checker, target, mode, lang
         )
     except Exception as exc:
         logger.exception("check failed for %s: %s", target, exc)
-        rendered = texts.error_screen(lang)
+        outcome = CheckOutcome(
+            text=texts.error_screen(lang), basic_status=None, basic_username=None
+        )
 
-    keyboard = main_menu_keyboard(lang)
+    rendered = outcome.text
+    if (
+        outcome.basic_status is CheckStatus.OCCUPIED
+        and outcome.basic_username
+    ):
+        # An occupied /check result used to be a dead end - the user could only
+        # back out. Hand them the same "Find similar" entry the search result
+        # uses, so a taken name never strands them. The hint line points at it.
+        rendered = f"{rendered}\n\n{t(lang, 'result.occupied_hint')}"
+        keyboard = occupied_result_keyboard(lang, outcome.basic_username)
+    else:
+        keyboard = main_menu_keyboard(lang)
+
     try:
         await placeholder.edit_text(rendered, reply_markup=keyboard)
     except Exception:

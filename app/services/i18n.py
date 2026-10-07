@@ -107,6 +107,9 @@ EN: dict[str, str] = {
     "result.type": "Type: {value}",
     "result.reason": "Reason: {value}",
     "result.title_field": "Title: {value}",
+    "result.occupied_hint": (
+        "{info} <i>Press <b>Find similar</b> below for free alternatives.</i>"
+    ),
     "result.verified": "{bolt} Verified just now",
     "result.verified_ms": "{bolt} Verified just now ({ms} ms)",
     "result.source": "Checked via: {value}",
@@ -892,6 +895,10 @@ RU: dict[str, str] = {
     "result.type": "Тип: {value}",
     "result.reason": "Причина: {value}",
     "result.title_field": "Название: {value}",
+    "result.occupied_hint": (
+        "{info} <i>Нажмите <b>«Найти похожие»</b> ниже — бот сам найдёт "
+        "свободные варианты.</i>"
+    ),
     "result.verified": "{bolt} Проверено только что",
     "result.verified_ms": "{bolt} Проверено только что ({ms} мс)",
     "result.source": "Проверено через: {value}",

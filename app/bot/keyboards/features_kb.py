@@ -330,6 +330,36 @@ def variants_keyboard(lang: str, seed: str) -> InlineKeyboardMarkup:
     )
 
 
+def occupied_result_keyboard(lang: str, username: str) -> InlineKeyboardMarkup:
+    """Action row for an occupied /check result.
+
+    The basic check correctly reports a name as occupied, but the screen used to
+    be a dead end - the user could only go back to the menu. One tap now hands
+    them straight to free alternatives through the same variants flow the
+    search "find similar" button uses, so an occupied name never strands them.
+    """
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                btn(
+                    t(lang, "btn.variants"), icon="compass", style=PRIMARY,
+                    callback_data=f"{cb.FIND_VARIANTS_PREFIX}:{username}",
+                ),
+                btn(
+                    t(lang, "btn.new_search"), icon="search", style=NEUTRAL,
+                    callback_data=cb.MENU_SEARCH_ENGINE,
+                ),
+            ],
+            [
+                btn(
+                    t(lang, "btn.main_menu"), icon="home", style=NEUTRAL,
+                    callback_data=cb.MENU_HOME,
+                )
+            ],
+        ]
+    )
+
+
 def favorites_keyboard(lang: str, favorites: list) -> InlineKeyboardMarkup:
     rows = [
         [
