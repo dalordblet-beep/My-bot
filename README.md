@@ -8,6 +8,36 @@ not give a trustworthy answer.
 /start -> LANGUAGE -> CAPTCHA -> required subscriptions -> access granted -> main menu
 ```
 
+## Deploy on a server (Docker, one command)
+
+The repository ships a `Dockerfile` and a `docker-compose.yml` (bot + Postgres +
+Redis), so a server needs only Docker installed:
+
+```bash
+git clone https://github.com/dalordblet-beep/My-bot.git
+cd My-bot
+cp .env.example .env      # fill BOT_TOKEN, ADMIN_IDS, REQUIRED_SUBSCRIPTIONS, API_ID/API_HASH
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+The bot waits for the Postgres and Redis healthchecks. Its database lives on the
+`pgdata` volume and the MTProto session on the `mtproto_session` volume, so
+`docker compose up -d --build` after a code update keeps both.
+
+The MTProto login is interactive, so it is done **once** inside the container:
+
+```bash
+docker compose run --rm bot python scripts/login_mtproto.py
+```
+
+Without a session the bot still runs; availability is then only as good as the
+Bot API (see §11). To run without Docker: `pip install -r requirements.txt`,
+fill `.env`, then `python -m app.main` (or `start.bat` on Windows).
+
+> The bot uses **long polling**: it needs **no open inbound port and no domain** —
+> only outbound HTTPS to `api.telegram.org`.
+
 ## Collectible usernames — how to turn them on
 
 Collectible lookup uses **Telegram's own API**: MTProto method
