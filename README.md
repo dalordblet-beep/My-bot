@@ -25,26 +25,21 @@ The bot waits for the Postgres and Redis healthchecks. Its database lives on the
 `pgdata` volume and the MTProto session on the `mtproto_session` volume, so
 `docker compose up -d --build` after a code update keeps both.
 
-The MTProto login is interactive, so it is done inside the container:
+The bot authorises its MTProto session **automatically as the bot** from
+`BOT_TOKEN` on startup, so a fresh deploy just needs `docker compose up -d
+--build` — no interactive login step. A manual phone login is only needed if you
+want a *user* session (see §11).
 
-```bash
-docker compose run --rm -it bot python scripts/login_mtproto.py --force
-```
-
-`--force` deletes the session first, so Telegram asks for the phone number and
-the code again. Without it the script does nothing when a session already
-exists — Telethon never re-prompts on an authorised session.
-
-To see which account the current session belongs to (and whether it is a bot):
+To inspect which account the current session belongs to (and whether it is a
+bot):
 
 ```bash
 docker compose run --rm bot python scripts/login_mtproto.py --status
 ```
 
-Same flags on Windows: `login.bat` asks whether to replace the existing session
-and then runs the script with `--force`. Enter the **phone number** with the
-country code — pasting a bot token authorises a bot, and bots cannot call
-`account.checkUsername`. Without a session the bot still runs; availability is
+`login.bat` on Windows does the same `--status` check; pass `--force` to replace
+the session with an interactive phone login if you specifically need a user
+session. Without any MTProto session the bot still runs, but availability is
 then only as good as the Bot API (see §11). To run without Docker:
 `pip install -r requirements.txt`, fill `.env`, then `python -m app.main`
 (or `start.bat` on Windows).
@@ -125,7 +120,7 @@ FRAGMENT_ENABLED=true
 | `API_ID / API_HASH are missing` | Fill them in `.env` (§4). |
 | The code never arrives | Check the Telegram app on the account's own device; SMS is not used. |
 | `SessionPasswordNeededError` | You have two-step verification — enter your cloud password when prompted. |
-| Still says "needs the one-time MTProto login" | The bot was not restarted after the login. |
+| Availability checks fail after a fresh deploy | The bot auto-logs in as the bot via `BOT_TOKEN`; if it still fails, check `API_ID`/`API_HASH` are set and restart the bot. |
 | `AuthKeyDuplicatedError` | The session file was copied between machines. Delete it and log in again. |
 
 ## Features
@@ -492,16 +487,25 @@ rate limits or extra verification at login, and using another application's
 credentials is against Telegram's ToS. Fine for a personal tool; not something
 to build a business on.
 
-**Either way, the phone login is unavoidable.** `API_ID`/`API_HASH` identify
-the *application*; a session still has to be authorised as a *user*:
+**The phone login is now optional — bot auto-login is the default.** As long
+as `BOT_TOKEN` is set, the bot authorises its MTProto session **as the bot
+itself** using its own token on every startup (`MtprotoClient.start()`). No
+phone number, no login code, nothing interactive. Telegram's availability answer
+comes from `contacts.resolveUsername`, which a bot session can call directly —
+that is all the search pipeline needs.
+
+If the session file is missing or gets wiped (for example by an aborted manual
+login), the bot **self-heals**: it drops the stale session and re-authorises as
+the bot by token again. The "30 checked, none confirmed" outage that a dead
+session used to cause no longer needs a human to fix it.
 
 ```bash
-python scripts/login_mtproto.py
+python scripts/login_mtproto.py --status   # show which account the session belongs to
 ```
 
-You will be asked for a phone number and the login code Telegram sends you.
-The session file is written to the project root and is git-ignored. This is the
-one step that cannot be automated for you.
+`scripts/login_mtproto.py` is now only for inspecting the session, or — if you
+specifically want a *user* session (e.g. to experiment with the user-only
+`account.checkUsername`) — doing an interactive phone login with `--force`.
 
 **If you would rather skip MTProto entirely**, set:
 
@@ -562,7 +566,7 @@ Admins bypass the onboarding gate. Every admin action is written to
 | `BOT_TOKEN is not set` (exit 2) | Fill `BOT_TOKEN` in `.env`. |
 | `Telegram rejected BOT_TOKEN` (exit 4) | The token is wrong or was revoked — re-copy it from BotFather. |
 | `PostgreSQL is unreachable` (exit 3) | Is the container up? Check `DATABASE_URL`. |
-| Every check says `Unknown` | MTProto session is missing or not authorised. Run `scripts/login_mtproto.py`, or set `ALLOW_BOT_API_AVAILABILITY=true`. |
+| Every check says `Unknown` | MTProto session is missing or not authorised. The bot self-heals by re-authorising as the bot via `BOT_TOKEN` on restart; if it keeps happening, check `API_ID`/`API_HASH`/`BOT_TOKEN`, or set `ALLOW_BOT_API_AVAILABILITY=true`. |
 | Channel verify always fails | The bot is not an administrator of the channel/chat, or `REQUIRED_*_ID` points at the wrong chat. |
 | `Collectible engine is not configured` | Set `FRAGMENT_ENABLED=true`. Fragment has no public API; the lookup is a best-effort page read. |
 | Checks are slow | That is the rate limiter working. Lower `REQUEST_DELAY` only if you accept FloodWait risk. |

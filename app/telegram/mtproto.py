@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+from pathlib import Path
 from typing import Any
 
 from app.config import settings
@@ -116,24 +117,66 @@ class MtprotoClient:
         if self._client is not None:
             return self._ready
         try:
-            self._client = TelegramClient(
-                settings.mtproto_session,
-                settings.api_id,
-                settings.api_hash,
-            )
-            await self._client.connect()
-            self._ready = await self._client.is_user_authorized()
-            if not self._ready:
-                logger.warning(
-                    "mtproto session is not authorised - run scripts/login_mtproto.py"
+            # When a bot token is available the session is self-healing: a
+            # missing or wiped session (for example, one deleted by an aborted
+            # interactive login) is re-authorised as the bot automatically, with
+            # no phone number and no code. That is exactly what the availability
+            # checks require, and it stops the silent failure where the session
+            # was deleted and every name then came back UNKNOWN.
+            if settings.bot_token:
+                self._client = TelegramClient(
+                    settings.mtproto_session, settings.api_id, settings.api_hash
                 )
+                await self._client.start(bot_token=settings.bot_token)
+                self._ready = await self._client.is_user_authorized()
+                if not self._ready:
+                    # A stale or half-finished session left an unauthorised
+                    # shell. Drop it and log the bot in fresh by token.
+                    logger.warning(
+                        "mtproto session unauthorised - re-authorising as bot by token"
+                    )
+                    await self._safe_disconnect()
+                    self._remove_session_files()
+                    self._client = TelegramClient(
+                        settings.mtproto_session, settings.api_id, settings.api_hash
+                    )
+                    await self._client.start(bot_token=settings.bot_token)
+                    self._ready = await self._client.is_user_authorized()
             else:
+                self._client = TelegramClient(
+                    settings.mtproto_session, settings.api_id, settings.api_hash
+                )
+                await self._client.start()
+                self._ready = await self._client.is_user_authorized()
+                if not self._ready:
+                    logger.warning(
+                        "mtproto session is not authorised - run scripts/login_mtproto.py"
+                    )
+
+            if self._ready:
                 logger.info("mtproto connected and authorised")
         except Exception as exc:
             logger.error("mtproto start failed: %s", exc)
             self._client = None
             self._ready = False
         return self._ready
+
+    def _remove_session_files(self) -> None:
+        """Delete the on-disk session so a fresh login can start clean."""
+        base = settings.mtproto_session
+        for path in (Path(f"{base}.session"), Path(f"{base}.session-journal")):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError as exc:  # pragma: no cover - filesystem dependent
+                logger.debug("could not remove %s: %s", path, exc)
+
+    async def _safe_disconnect(self) -> None:
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
 
     async def stop(self) -> None:
         if self._client is not None:

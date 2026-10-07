@@ -1,18 +1,25 @@
-"""Create (or replace) an authorised MTProto (Telethon) session.
+"""Create (or inspect) an MTProto (Telethon) session.
 
-Why you need this
------------------
-The Bot API cannot tell "free" apart from "reserved/deleted". Only MTProto
-raises ``UsernameNotOccupiedError`` for a name nobody owns, which is what makes
-a definitive AVAILABLE answer possible.
+Note
+----
+The running bot **auto-authorises its own MTProto session as the bot** from
+``BOT_TOKEN`` on every startup (see ``MtprotoClient.start``). For the default
+availability checks that is all you need — no phone login, no code. This script
+is therefore only for two things:
+
+* ``--status`` — show which account the current session belongs to (and whether
+  it is a bot).
+* ``--force`` — replace the session with an interactive **user** login (phone
+  number + code). A user session is only required if you specifically want to
+  experiment with the user-only ``account.checkUsername``; the bot's availability
+  engine uses ``contacts.resolveUsername``, which a bot session already provides.
 
 Usage
 -----
-    python scripts/login_mtproto.py            # log in if needed (no prompts when a session exists)
-    python scripts/login_mtproto.py --force    # delete the session and log in again
-    python scripts/login_mtproto.py --status   # just show which account the session belongs to
+    python scripts/login_mtproto.py            # --status by default (no prompts)
+    python scripts/login_mtproto.py --force    # delete the session and log in as a user
+    python scripts/login_mtproto.py --status   # show which account the session belongs to
 
-You will be asked for the phone number of the account and the login code.
 The resulting ``*.session`` file is written next to the project root and must
 never be committed (it is already in .gitignore).
 """
@@ -137,10 +144,13 @@ async def main(argv: list[str] | None = None) -> int:
 
     print(f"Session file: {settings.mtproto_session}.session")
     print(
+        "This path creates a USER session (phone + code). The running bot already\n"
+        "logs in as the bot via BOT_TOKEN, so only do this if you specifically\n"
+        "want a user session for account.checkUsername.\n"
         "When asked for a phone number, enter it WITH the country code "
         "(e.g. +79991234567).\n"
-        "Do NOT paste a bot token: that authorises a BOT, and Telegram blocks\n"
-        "the dedicated account.checkUsername method for bots.\n"
+        "Do NOT paste a bot token here: the bot already holds that session, and\n"
+        "Telegram blocks the dedicated account.checkUsername method for bots.\n"
         "The login code arrives inside the Telegram app, not by SMS.\n"
     )
 

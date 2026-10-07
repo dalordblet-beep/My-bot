@@ -390,6 +390,28 @@ def _letter_variant(word: str, rng: random.Random) -> str:
     return word[:position] + replacement + word[position + 1:]
 
 
+def _root_variant(base: str, rng: random.Random, length: int | None) -> str:
+    """A name built around ``base``: append a short pronounceable tail, swap one
+    letter for a similar one, or lead with a consonant. It still reads like the
+    seed but is almost always unclaimed - and, because the pool is shuffled by
+    the caller, a different twist comes out every run.
+    """
+    target = length or (len(base) + rng.choice([1, 2]))
+    target = max(MIN_LENGTH, min(MAX_LENGTH, target))
+
+    if len(base) < target:
+        # Append a short pronounceable tail - the most "similar" twist.
+        name = base + _coinage(rng, target - len(base))
+    elif len(base) >= 3:
+        # Swap one letter for a similar-sounding one.
+        pos = rng.randrange(len(base))
+        pool = _COINAGE_CONSONANTS if base[pos] in _COINAGE_CONSONANTS else _COINAGE_VOWELS
+        name = base[:pos] + rng.choice(pool) + base[pos + 1:]
+    else:
+        name = _coinage(rng, target)
+    return name[:target]
+
+
 def _seed_family(
     base: str,
     length: int | None,
@@ -402,27 +424,39 @@ def _seed_family(
 ) -> Iterator[str]:
     """Candidates built around a user-supplied base word.
 
-    The base and its brand variants are what the user asked for - and the most
-    taken names in the system. When ``include_coinages`` is set, readable
-    coinages are interleaved rather than left to the end (and are produced even
-    with no fixed length), so an exact-name search cannot exhaust its small
-    variant family and report "all taken".
+    Shuffled and sub-sampled on purpose: "find similar" must hand back a
+    *different* beautiful set every time it is pressed, not the same fixed
+    scenario. A handful of near-root coinages keeps the names similar to the
+    seed while almost always being free.
     """
+    # Random pool sizes so each run picks different affixes from the seed.
+    suffixes = list(TECH_SUFFIXES) + ["coder", "engineer", "builds", "shop", "store", "team", "hq", "x"]
+    rng.shuffle(suffixes)
+    suffixes = suffixes[: rng.randint(5, min(9, len(suffixes)))]
+
+    prefixes = list(PREFIXES)
+    rng.shuffle(prefixes)
+    prefixes = prefixes[: rng.randint(2, min(4, len(prefixes)))]
+
+    numbers = ["1", "7", "21", "42", "99", "777"]
+    rng.shuffle(numbers)
+    numbers = numbers[: rng.randint(2, len(numbers))]
+
     emitted = 0
 
     def valuable() -> Iterator[str]:
         yield base
-        suffixes: list[str] = list(TECH_SUFFIXES)
-        suffixes += ["coder", "engineer", "builds", "shop", "store", "team"]
         for suffix in suffixes:
             yield base + suffix
             if allow_digits:
                 yield f"{base}_{suffix}"
-        for prefix in PREFIXES:
+        for prefix in prefixes:
             yield prefix + base
-        if allow_digits:
-            for number in ("1", "7", "21", "42", "99", "777"):
-                yield base + number
+        for number in numbers:
+            yield base + number
+        # Near-root coinages: same root, one twist - similar *and* usually free.
+        for _ in range(rng.randint(4, 10)):
+            yield _root_variant(base, rng, length)
 
     coinage_length = length or max(MIN_LENGTH, min(MAX_LENGTH, len(base) + 2))
 
