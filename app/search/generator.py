@@ -26,7 +26,6 @@ from app.search.pattern import (
     LETTERS,
     MAX_LENGTH,
     MIN_LENGTH,
-    VOWELS,
     _WORD_SET,
     rate,
 )
@@ -185,12 +184,23 @@ def _fits(name: str, length: int | None, allow_digits: bool) -> bool:
     return True
 
 
+# Letters a coinage is built from. The "ugly" ones (q, x, j, w, z - the ones
+# `pattern.sound_score` penalises) are excluded on purpose: a coinage without
+# them reads cleanly, so it scores as *readable* and keeps its premium points.
+_COINAGE_VOWELS = "aeiou"
+_COINAGE_CONSONANTS = "bcdfghklmnprstv"
+
+
 def _coinage(rng: random.Random, length: int) -> str:
-    """Build a pronounceable, vaguely brandable string of the given length."""
+    """Build a pronounceable, brandable string of the given length.
+
+    Strict consonant/vowel alternation with a clean alphabet, so the result is
+    always sayable - and, being a coinage, almost always still free.
+    """
     out: list[str] = []
     want_vowel = rng.random() < 0.5
     while len(out) < length:
-        pool = "".join(ch for ch in LETTERS if (ch in VOWELS) == want_vowel) or LETTERS
+        pool = _COINAGE_VOWELS if want_vowel else _COINAGE_CONSONANTS
         out.append(rng.choice(pool))
         want_vowel = not want_vowel
     return "".join(out)
@@ -223,6 +233,15 @@ def _compound(word: str, other: str, target: int | None) -> str | None:
     return joined
 
 
+# How many "valuable" (word-like) candidates are offered before one coinage is
+# mixed in. The exact dictionary words are the most desirable *and* the most
+# taken, so a stream of nothing but words burns the entire lookup budget on
+# occupied names and the search ends with "all taken" - which is exactly what it
+# did. Interleaving guarantees a readable, almost-always-free name appears in
+# the very first screen batch.
+_VALUABLE_PER_COINAGE = 2
+
+
 def beautiful_candidates(
     *,
     seed: str | None = None,
@@ -231,25 +250,23 @@ def beautiful_candidates(
     min_score: int = 0,
     rng: random.Random | None = None,
     limit: int = 400,
+    include_coinages: bool = True,
 ) -> Iterator[str]:
     """Yield candidates ordered from most to least *findable and valuable*.
 
-    Order matters: the finder spends one real lookup per candidate, so the
-    stream has to balance two goals that pull in opposite directions - a name
-    must be worth having, and it must have a real chance of being free.
+    Two streams are merged rather than run one after the other:
 
-    The old order (every dictionary word, then brands, then coinages) failed
-    the second goal badly: the top dictionary words are all long taken, so a
-    search burned its whole budget on occupied names and reported nothing. The
-    order now walks tiers of *decreasing scarcity*:
+    * **valuable** - real words, word + a letter, word + brand suffix, hybrids.
+      These are what a user wants, and almost all of them are already taken.
+    * **coinages** - readable, brandable strings that are almost always free.
 
-    1. real words of the requested length (the most valuable, mostly taken);
-    2. real words with one letter added - still word-like, far more available;
-    3. word + brand suffix (``cranehq``, ``shopapp``);
-    4. pronounceable coinages of the requested length.
+    The old order emitted the whole valuable stream first, so the finder spent
+    its budget on saturated names and reported "everything is taken". Merging
+    them means a free name shows up within the first few candidates, while the
+    list stays full of genuinely desirable handles.
 
-    "Valuable" is still decided by :func:`app.search.pattern.rate` - the tier is
-    only a search-order heuristic, never a second scoring system.
+    ``include_coinages=False`` keeps a stream strictly seed-like - used by the
+    variants search, where a random coinage would not be a "close alternative".
     """
     rng = rng or random.Random()
     emitted: set[str] = set()
@@ -271,84 +288,93 @@ def beautiful_candidates(
         base = UsernameGenerator._base(seed)
         if not base:
             return
-        yield from _seed_family(base, length, allow_digits, rng, limit, offer, lambda: count)
+        yield from _seed_family(
+            base, length, allow_digits, rng, limit, offer, lambda: count, include_coinages
+        )
         return
 
-    # 1. real words of the requested length, shuffled so repeated presses do not
-    #    return the same handle forever
-    words = [w for w in _WORD_SET if _fits(w, length, allow_digits)]
-    rng.shuffle(words)
-    for word in words:
+    valuable = iter(_valuable_stream(length, allow_digits, rng, limit))
+    coinages = iter(_coinage_stream(length, rng, limit) if include_coinages else ())
+    valuable_done = coinages_done = False
+
+    while count < limit and not (valuable_done and coinages_done):
+        for _ in range(_VALUABLE_PER_COINAGE):
+            if count >= limit:
+                break
+            candidate = _take(valuable, offer)
+            if candidate is None:
+                valuable_done = True
+                break
+            yield candidate
         if count >= limit:
-            return
-        candidate = offer(word)
-        if candidate:
+            break
+
+        candidate = _take(coinages, offer)
+        if candidate is None:
+            coinages_done = True
+        else:
             yield candidate
 
-    # 2. word + one letter. Still reads as a real name, but the extra letter
-    #    moves it out of the saturated "exact dictionary word" space and into
-    #    one where free names genuinely exist.
+
+def _take(iterator: Iterator[str], offer) -> str | None:
+    """Pull the next candidate ``offer`` accepts, or None once exhausted."""
+    for name in iterator:
+        accepted = offer(name)
+        if accepted is not None:
+            return accepted
+    return None
+
+
+def _valuable_stream(
+    length: int | None, allow_digits: bool, rng: random.Random, limit: int
+) -> Iterator[str]:
+    """Word-like candidates, most valuable first - and most taken."""
+    words = [w for w in _WORD_SET if _fits(w, length, allow_digits)]
+    rng.shuffle(words)
+    yield from words
+
+    # word + one letter: still reads as a real name, far more available
     for word in words:
         for _ in range(2):
-            if count >= limit:
-                return
-            variant = _letter_variant(word, rng)
-            candidate = offer(variant)
-            if candidate:
-                yield candidate
+            yield _letter_variant(word, rng)
 
-    # 3. word + brand suffix ("crane" -> "cranehq", "shop" -> "shopapp")
+    # word + brand suffix ("crane" -> "cranehq")
     base_words = [w for w in _WORD_SET if 4 <= len(w) <= 7]
     rng.shuffle(base_words)
     for word in base_words:
         for suffix in BRAND_SUFFIXES:
-            if count >= limit:
-                return
-            candidate = offer(word + suffix)
-            if candidate:
-                yield candidate
+            yield word + suffix
 
-    # 4. hybrids of two real words ("money"+"motor" -> "moneytor"). Word-like
-    #    enough to rate well, but no longer an exact dictionary word, so the
-    #    supply of free candidates is far larger.
+    # hybrids of two real words ("money"+"motor" -> "moneytor")
     short_words = [w for w in _WORD_SET if 3 <= len(w) <= 6]
-    rng.shuffle(short_words)
-    for _ in range(limit * 4):
-        if count >= limit:
-            return
-        first = rng.choice(short_words)
-        second = rng.choice(short_words)
-        if first == second:
-            continue
-        for hybrid in _blend(first, second, rng, length)[:2]:
-            if count >= limit:
-                return
-            candidate = offer(hybrid)
-            if candidate:
-                yield candidate
-
-    # 5. two short words joined (only when the requested length allows it)
-    if length is None or length >= 8:
-        for _ in range(limit * 2):
-            if count >= limit:
-                return
+    if short_words:
+        rng.shuffle(short_words)
+        for _ in range(max(1, limit) * 4):
             first = rng.choice(short_words)
             second = rng.choice(short_words)
-            joined = _compound(first, second, length)
-            if joined is None:
+            if first == second:
                 continue
-            candidate = offer(joined)
-            if candidate:
-                yield candidate
+            yield from _blend(first, second, rng, length)[:2]
 
-    # 6. pronounceable coinages of the requested length
+        # two short words joined ("home"+"shop")
+        if length is None or length >= 8:
+            for _ in range(max(1, limit) * 2):
+                first = rng.choice(short_words)
+                second = rng.choice(short_words)
+                joined = _compound(first, second, length)
+                if joined is not None:
+                    yield joined
+
+
+def _coinage_stream(length: int | None, rng: random.Random, limit: int) -> Iterator[str]:
+    """Readable coinages - the stream that actually guarantees a free name.
+
+    The supply is effectively unlimited, so it is bounded generously and merged
+    into the valuable stream rather than parked at the end of it.
+    """
     target = length or 6
-    for _ in range(limit * 3):
-        if count >= limit:
-            return
-        candidate = offer(_coinage(rng, target))
-        if candidate:
-            yield candidate
+    for _ in range(max(1, limit) * 20):
+        yield _coinage(rng, target)
 
 
 def _letter_variant(word: str, rng: random.Random) -> str:
@@ -372,54 +398,59 @@ def _seed_family(
     limit: int,
     offer,
     count,
+    include_coinages: bool = True,
 ) -> Iterator[str]:
-    """Candidates built around a user-supplied base word."""
+    """Candidates built around a user-supplied base word.
+
+    The base and its brand variants are what the user asked for - and the most
+    taken names in the system. When ``include_coinages`` is set, readable
+    coinages are interleaved rather than left to the end (and are produced even
+    with no fixed length), so an exact-name search cannot exhaust its small
+    variant family and report "all taken".
+    """
     emitted = 0
 
-    name = offer(base)
-    if name:
-        yield name
-        emitted += 1
+    def valuable() -> Iterator[str]:
+        yield base
+        suffixes: list[str] = list(TECH_SUFFIXES)
+        suffixes += ["coder", "engineer", "builds", "shop", "store", "team"]
+        for suffix in suffixes:
+            yield base + suffix
+            if allow_digits:
+                yield f"{base}_{suffix}"
+        for prefix in PREFIXES:
+            yield prefix + base
+        if allow_digits:
+            for number in ("1", "7", "21", "42", "99", "777"):
+                yield base + number
 
-    suffixes: list[str] = list(TECH_SUFFIXES)
-    suffixes += ["coder", "engineer", "builds", "shop", "store", "team"]
-    for suffix in suffixes:
-        if emitted >= limit:
-            return
-        candidate = offer(base + suffix)
-        if candidate:
-            yield candidate
-            emitted += 1
-        if not allow_digits:
-            continue
-        spaced = offer(f"{base}_{suffix}")
-        if spaced:
-            yield spaced
-            emitted += 1
+    coinage_length = length or max(MIN_LENGTH, min(MAX_LENGTH, len(base) + 2))
 
-    for prefix in PREFIXES:
-        if emitted >= limit:
-            return
-        candidate = offer(prefix + base)
-        if candidate:
-            yield candidate
-            emitted += 1
+    def coinages() -> Iterator[str]:
+        for _ in range(max(1, limit) * 20):
+            yield _coinage(rng, coinage_length)
 
-    if allow_digits:
-        for number in ("1", "7", "21", "42", "99", "777"):
+    valuable_it = iter(valuable())
+    coinage_it = iter(coinages()) if include_coinages else iter(())
+    valuable_done = False
+    coinages_done = not include_coinages
+
+    while emitted < limit and not (valuable_done and coinages_done):
+        for _ in range(_VALUABLE_PER_COINAGE):
             if emitted >= limit:
-                return
-            candidate = offer(base + number)
-            if candidate:
-                yield candidate
-                emitted += 1
+                break
+            candidate = _take(valuable_it, offer)
+            if candidate is None:
+                valuable_done = True
+                break
+            emitted += 1
+            yield candidate
+        if emitted >= limit:
+            break
 
-    # Pronounceable coinages of the requested length, still filtered by score.
-    if length:
-        for _ in range(limit):
-            if emitted >= limit:
-                return
-            candidate = offer(_coinage(rng, length))
-            if candidate:
-                yield candidate
-                emitted += 1
+        candidate = _take(coinage_it, offer)
+        if candidate is None:
+            coinages_done = True
+        else:
+            emitted += 1
+            yield candidate

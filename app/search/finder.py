@@ -344,25 +344,30 @@ class UsernameFinder:
             if confirmations >= FREE_CONFIRM_BUDGET:
                 break
 
-        # Nothing free within the budget. Report the best name we found and be
-        # honest about why the search stopped - but never present an occupied
-        # name as a successful result.
-        if occupied_seen:
-            return FindAttempt(
-                username="",
-                premium=best_premium or premium_rating(""),
-                hit=False,
-                reason="all_taken",
-                generated_tries=screened,
-                value=estimate_value(best) if best else None,
-            )
-
+        # Nothing free within the budget. Report honestly why the search stopped
+        # - and never present an occupied name as a successful result.
+        #
+        # "Unconfirmed" is checked first on purpose: if any candidate reached the
+        # authoritative channel and could not be confirmed, that is the truth the
+        # user needs to hear ("verification did not work"), not "everything is
+        # taken" - the latter would hide a broken MTProto session behind a false
+        # verdict about the names.
         if unknown_seen:
             return FindAttempt(
                 username="",
                 premium=best_premium or premium_rating(""),
                 hit=False,
                 reason="unconfirmed",
+                generated_tries=screened,
+                value=estimate_value(best) if best else None,
+            )
+
+        if occupied_seen:
+            return FindAttempt(
+                username="",
+                premium=best_premium or premium_rating(""),
+                hit=False,
+                reason="all_taken",
                 generated_tries=screened,
                 value=estimate_value(best) if best else None,
             )
@@ -407,11 +412,12 @@ class UsernameFinder:
             )
 
         # The seed family, excluding the seed itself (it is the thing they want
-        # but cannot have, so it is useless in the shortlist).
+        # but cannot have, so it is useless in the shortlist). Coinages are left
+        # out on purpose: a random coinage is not a "close alternative".
         candidates = [
             name for name in beautiful_candidates(
                 seed=base, length=None, allow_digits=True, min_score=0,
-                rng=self._rng, limit=MAX_GENERATION_TRIES,
+                rng=self._rng, limit=MAX_GENERATION_TRIES, include_coinages=False,
             ) if name != base
         ]
 

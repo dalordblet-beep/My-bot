@@ -131,6 +131,13 @@ name that survives a **double check**:
 There is **no user-facing rating filter** — the bot applies its own taste. Every
 candidate is judged on five premium criteria and shown as **N/5** (see below).
 
+Candidates come from **two merged streams** — desirable word-like names (real
+words, brands, hybrids) and readable coinages. The word-like names are the most
+attractive *and* the most taken, so the coinages are interleaved rather than left
+to the end: a genuinely free name shows up within the first few lookups instead
+of the search burning its whole budget on saturated dictionary words and
+reporting "everything is taken".
+
 - **Length** — 5 to 16 characters, or any.
 - **Digits** — allow or forbid.
 - **Mask** — fix the shape of the name: `?` one letter, `#` one digit,
@@ -555,7 +562,7 @@ pip install -r requirements-dev.txt
 python -m pytest
 ```
 
-303 tests. The suite drives the real dispatcher, middlewares, routers and
+306 tests. The suite drives the real dispatcher, middlewares, routers and
 keyboards against a fake Telegram session — no network, no token. It covers the
 full onboarding flow (including wrong, expired and exhausted CAPTCHAs),
 access-guard bypass attempts, bans, temporary restrictions, the three check

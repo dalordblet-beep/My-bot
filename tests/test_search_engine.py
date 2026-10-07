@@ -459,3 +459,51 @@ async def test_finder_says_fragment_was_not_checked_when_marketplace_is_down(bot
 
     assert attempt.hit is True
     assert attempt.fragment_checked is False
+
+
+# ----------------------------------------------------- saturated-name regression
+async def test_finder_returns_a_free_name_when_every_word_is_taken(bot, monkeypatch):
+    """The reported bug: the search walked saturated names and said "all taken".
+
+    Everything word-like is occupied here and only coinages are free - the worst
+    realistic case. The finder must still come back with a free name, and it must
+    do so quickly instead of burning the budget on occupied words.
+    """
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+
+    from app.search.pattern import BRAND_SUFFIXES, is_real_word
+    from app.telegram.public_page import OCCUPIED, UNKNOWN, PublicPageResult
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    suffixes = tuple(BRAND_SUFFIXES)
+
+    def taken(name: str) -> bool:
+        return is_real_word(name) or name.endswith(suffixes)
+
+    class SaturatedProbe(FakePageProbe):
+        def __init__(self) -> None:
+            super().__init__(state="unknown")
+
+        async def check(self, username: str):
+            self.calls.append(username)
+            verdict = OCCUPIED if taken(username) else UNKNOWN
+            return PublicPageResult(verdict, reason="fake")
+
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=SaturatedProbe())
+
+    async def confirm(name: str):
+        status = CheckStatus.OCCUPIED if taken(name) else CheckStatus.AVAILABLE
+        return CheckResult(username=name, status=status, source="mtproto")
+
+    checker.confirm_availability = confirm
+    finder = UsernameFinder(checker, None, rng=random.Random(3))
+
+    for length in (5, 6, 8, None):
+        attempt = await finder.find_one(SearchCriteria(length=length))
+        assert attempt.hit is True, f"length={length}: gave up with {attempt.reason}"
+        assert attempt.username
+        assert not taken(attempt.username), f"length={length}: returned an occupied name"
+        # A free name has to show up in the first screen batch, not after 150
+        # occupied ones.
+        assert attempt.generated_tries <= 12, f"length={length}: {attempt.generated_tries} tries"

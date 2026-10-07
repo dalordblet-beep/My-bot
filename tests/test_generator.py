@@ -74,3 +74,35 @@ def test_empty_seed_yields_nothing():
     generator = UsernameGenerator()
     assert generator.generate("", count=10) == []
     assert generator.generate("!!!", count=10) == []
+
+
+# ----------------------------------------------------- search-order regression
+def test_beautiful_candidates_mix_free_names_into_the_first_batch():
+    """A stream of nothing but dictionary words burns the whole lookup budget.
+
+    The exact words are the most desirable *and* the most taken, so a coinage
+    has to appear almost immediately - within the first screen batch.
+    """
+    import random
+
+    from app.search.generator import beautiful_candidates
+    from app.search.pattern import is_real_word
+
+    names = list(beautiful_candidates(length=6, rng=random.Random(1), limit=40))
+    assert len(names) >= 6
+    # At least one non-dictionary (i.e. plausibly free) name in the first six.
+    assert any(not is_real_word(name) for name in names[:6]), names[:6]
+
+
+def test_coinages_avoid_the_ugly_letters():
+    """q/x/j/w/z are penalised by sound_score - a coinage must not use them."""
+    import random
+
+    from app.search.generator import _coinage
+
+    rng = random.Random(5)
+    for length in (5, 6, 8, 10):
+        for _ in range(50):
+            name = _coinage(rng, length)
+            assert len(name) == length
+            assert not (set(name) & set("qxjwz")), name
