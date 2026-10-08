@@ -671,67 +671,70 @@ EN: dict[str, str] = {
     "support.faq_btn": "FAQ",
     "support.write_btn": "Message the developer",
     "support.faq_title": "{question} <b>FAQ</b>",
-    "support.faq_q1": "<b>A free name was reported as taken. Why?</b>",
+    "support.faq_q1": "<b>How do I find a free username?</b>",
     "support.faq_a1": (
-        "It was not free. Only Telegram's own directory can declare a name "
-        "unowned, and the bot asks it directly for every candidate that survives "
-        "the first screen. When that answer does not come back, the bot says "
-        "\"unconfirmed\" rather than guessing."
+        "Open <b>Search</b> from the main menu. Choose a length, switch digits "
+        "on or off, and add a mask to target real words - for example "
+        "<code>cat*</code>. The bot screens public pages, confirms availability "
+        "through Telegram, and shows only names you can actually claim."
     ),
-    "support.faq_q2": "<b>Why does the search answer instantly now?</b>",
+    "support.faq_q2": "<b>What do the grades S, A, B, C and D mean?</b>",
     "support.faq_a2": (
-        "Searches run through a queue. You get your place in it at once and the "
-        "result is delivered into the same message when it is ready - so a slow "
-        "Telegram reply never leaves you staring at a frozen screen. Higher "
-        "tiers are served first."
+        "Our own 0-100 rating. It scores scarcity (shorter is rarer), whether it "
+        "is a real word, how easy it is to pronounce and spell, and the use of "
+        "digits. S is a name worth taking today; D is forgettable. Each result "
+        "also shows what lifts the score and what caps it."
     ),
-    "support.faq_q3": "<b>What do the grades S, A, B, C and D mean?</b>",
+    "support.faq_q3": "<b>A name says \"free\" but Telegram won't let me take it. Why?</b>",
     "support.faq_a3": (
-        "Our own rubric: five criteria worth 100 points - scarcity (length), "
-        "meaning (is it a real word), sound (can it be said and spelled aloud), "
-        "digits and symbols. S is a name worth claiming today; D is forgettable. "
-        "Every result also shows which criterion carries it and which one caps it."
+        "\"Free\" means it is not occupied right now, but Telegram still refuses "
+        "some names: short dictionary words, names on cooldown after a rename, and "
+        "reserved handles. Some are also listed for sale on Fragment, not up for "
+        "grabs. The appraiser's <b>claimable</b> check tells you whether you can "
+        "really grab it."
     ),
-    "support.faq_q4": "<b>I cannot get the name I want. What now?</b>",
+    "support.faq_q4": "<b>How is a username's price estimated?</b>",
     "support.faq_a4": (
-        "Press <b>Variants</b>. The bot builds close alternatives from the same "
-        "root - <code>moged</code> becomes <code>mogedhq</code>, "
-        "<code>mogedapp</code> - and tells you which of them are actually free."
+        "Tap <b>Appraise</b> or send <code>/appraise name</code>. The bot compares "
+        "your name to real Fragment listings of the same length and digit shape, "
+        "shows one approximate price in TON, its rarity band, and warns if it is a "
+        "brand name. Prices are estimates, not offers."
     ),
-    "support.faq_q5": "<b>How do I claim a name I found?</b>",
+    "support.faq_q5": "<b>What is the Portfolio for?</b>",
     "support.faq_a5": (
-        "Press <b>Open</b> - it goes straight to that name on Telegram. Usernames "
-        "are first come, first served, so claim it the moment you see it. The "
-        "result also carries a copyable handle."
+        "Your saved list. Appraise a name and add it, and the bot keeps it with "
+        "its latest value and claimable status. Use <b>Refresh</b> to re-check the "
+        "whole list at once, and remove items you no longer want."
     ),
     "support.faq_q6": "<b>How does Username Watch work?</b>",
     "support.faq_a6": (
-        "Open Username Watch from the main menu and add an exact username. The first "
-        "check starts shortly; the default repeat interval is about 15 seconds per name. "
-        "Telegram has no release event, so this cannot guarantee a same-second alert. "
-        "Checks are rate-paced and may queue when several watches are due."
+        "Open <b>Username Watch</b> and add an exact username. The bot checks it "
+        "on a timer (about every 15 seconds per name) and alerts you the moment it "
+        "becomes claimable. Telegram sends no \"released\" event, so timing depends "
+        "on the check interval - checks pace themselves to avoid limits."
     ),
     "support.faq_q7": "<b>What is the Daily Drop?</b>",
     "support.faq_a7": (
-        "One search a day with your saved settings, delivered as a message - the "
-        "bot hunts while you are away. Turn it on in Settings."
+        "One automatic search per day using your saved settings, delivered as a "
+        "message while you are away. Turn it on in <b>Settings</b>."
     ),
-    "support.faq_q8": "<b>Why does collectible search rarely find anything?</b>",
+    "support.faq_q8": "<b>How do masks and filters help?</b>",
     "support.faq_a8": (
-        "Collectible names are a small fixed set, so a random guess rarely lands "
-        "on one. Give a mask to target a specific word - or leave it empty and the "
-        "bot shows what is listed on the market right now."
+        "A mask targets a specific idea instead of random guesses - "
+        "<code>*bot</code>, <code>neo?</code>, digits in fixed spots. Filters "
+        "narrow by length and digits. Targeted searches find real, brandable names "
+        "far faster than pure brute force."
     ),
-    "support.faq_q9": "<b>Why does the bot sometimes say Telegram is throttling it?</b>",
+    "support.faq_q9": "<b>Why does the bot sometimes pause or say Telegram is limiting it?</b>",
     "support.faq_a9": (
-        "Telegram limits how often one account may ask about usernames. When the "
-        "limit is hit the bot says so plainly and pauses instead of pretending the "
-        "names are taken. Nothing is lost - press Search again in a few minutes."
+        "Telegram caps how often one account may check usernames. When the limit "
+        "is hit the bot says so plainly and waits instead of faking \"taken\" "
+        "results. Nothing is lost - just run the search again in a few minutes."
     ),
     "support.faq_q10": "<b>Is my data safe?</b>",
     "support.faq_a10": (
-        "The bot stores your Telegram id, your settings and your search history. "
-        "Nothing is shared with third parties."
+        "The bot stores only your Telegram id, your settings and your search "
+        "history. Nothing is sold or shared with third parties."
     ),
 
     # ---------------------------------------------------------------- new buttons
@@ -1512,70 +1515,74 @@ RU: dict[str, str] = {
     "support.faq_btn": "FAQ",
     "support.write_btn": "Написать разработчику",
     "support.faq_title": "{question} <b>FAQ</b>",
-    "support.faq_q1": "<b>Свободное имя показали как занятое. Почему?</b>",
+    "support.faq_q1": "<b>Как найти свободный юзернейм?</b>",
     "support.faq_a1": (
-        "Значит, оно не свободно. Свободным имя может назвать только собственный "
-        "справочник Telegram, и бот спрашивает его напрямую по каждому кандидату, "
-        "который прошёл первую отсечку. Если ответ не пришёл, бот честно пишет "
-        "«не подтверждено», а не угадывает."
+        "Откройте <b>Поиск</b> в главном меню. Выберите длину, включите или "
+        "выключите цифры и задайте маску под настоящее слово — например "
+        "<code>cat*</code>. Бот проверяет публичные страницы, подтверждает "
+        "доступность через Telegram и показывает только те имена, которые реально "
+        "можно занять."
     ),
-    "support.faq_q2": "<b>Почему поиск теперь отвечает мгновенно?</b>",
+    "support.faq_q2": "<b>Что означают классы S / A / B / C / D?</b>",
     "support.faq_a2": (
-        "Поиски идут через очередь. Место в ней вы получаете сразу, а результат "
-        "приходит в это же сообщение, когда готов, — поэтому медленный ответ "
-        "Telegram больше не оставляет вас на замершем экране. Платные уровни "
-        "обслуживаются первыми."
+        "Это наша собственная оценка от 0 до 100. Учитываются редкость (короче = "
+        "реже), настоящее ли это слово, насколько легко произнести и написать на "
+        "слух, а также цифры. S — имя, которое стоит забрать сегодня, D — "
+        "проходное. В каждом результате видно, что поднимает оценку, а что её "
+        "ограничивает."
     ),
-    "support.faq_q3": "<b>Что означают классы S, A, B, C и D?</b>",
+    "support.faq_q3": "<b>Имя пишут «свободно», а Telegram не даёт его занять — почему?</b>",
     "support.faq_a3": (
-        "Это наш собственный набор критериев: пять пунктов на 100 баллов — "
-        "редкость (длина), смысл (настоящее ли это слово), звучание (легко ли "
-        "произнести и написать на слух), цифры и символы. S — имя, которое стоит "
-        "забрать сегодня, D — проходное. В результате видно, что имя вытягивает, "
-        "а что его ограничивает."
+        "«Свободно» значит, что оно сейчас не занято, но Telegram всё равно "
+        "отказывает в некоторых именах: коротких словарных словах, именах на "
+        "«остывании» после смены и зарезервированных. Часть также выставлена на "
+        "продажу на Fragment и недоступна бесплатно. Проверка <b>claimable</b> в "
+        "оценке говорит, можно ли его реально забрать."
     ),
-    "support.faq_q4": "<b>Нужное имя занято. Что делать?</b>",
+    "support.faq_q4": "<b>Как оценивается цена юзернейма?</b>",
     "support.faq_a4": (
-        "Нажмите <b>Варианты</b>. Бот соберёт близкие замены от той же основы — "
-        "<code>moged</code> превращается в <code>mogedhq</code>, "
-        "<code>mogedapp</code> — и скажет, какие из них действительно свободны."
+        "Нажмите <b>Оценить имя</b> или отправьте <code>/appraise имя</code>. Бот "
+        "сравнивает имя с реальными лотами Fragment той же длины и формы цифр, "
+        "показывает одну примерную цену в TON, её редкость и предупреждает, если "
+        "это бренд. Цены — оценка, а не предложение."
     ),
-    "support.faq_q5": "<b>Как забрать найденное имя?</b>",
+    "support.faq_q5": "<b>Для чего Портфель?</b>",
     "support.faq_a5": (
-        "Нажмите <b>Открыть</b> — это сразу перейдёт к имени в Telegram. "
-        "Юзернеймы выдаются «кто первый», поэтому занимайте его сразу. В "
-        "результате также есть ник, который можно скопировать."
+        "Это ваш сохранённый список. Оцените имя и добавьте его — бот хранит его с "
+        "актуальной стоимостью и статусом claimable. Кнопка <b>Обновить</b> "
+        "перепроверяет весь список сразу, а ненужные можно удалить."
     ),
     "support.faq_q6": "<b>Как работает слежение за username?</b>",
     "support.faq_a6": (
-        "Откройте «Слежение за никами» в главном меню и добавьте конкретный username. "
-        "Первая проверка начнётся скоро, затем по умолчанию ник проверяется примерно "
-        "раз в 15 секунд. Telegram не присылает событие об освобождении имени, поэтому "
-        "гарантировать уведомление в ту же секунду нельзя. Проверки ограничены по частоте "
-        "и при высокой нагрузке встают в очередь."
+        "Откройте <b>Слежение за никами</b> и добавьте точный username. Бот "
+        "проверяет его по таймеру (примерно раз в 15 секунд на имя) и предупредит, "
+        "как только имя станет доступным. Telegram не присылает событие "
+        "«освободилось», поэтому точность зависит от интервала проверки — проверки "
+        "сами ограничивают частоту, чтобы не упереться в лимиты."
     ),
     "support.faq_q7": "<b>Что такое Daily Drop?</b>",
     "support.faq_a7": (
-        "Один поиск в день с вашими настройками, который приходит сообщением, — "
-        "бот охотится, пока вас нет. Включается в настройках."
+        "Один автоматический поиск в день с вашими настройками, который приходит "
+        "сообщением, пока вас нет. Включается в <b>Настройках</b>."
     ),
-    "support.faq_q8": "<b>Почему поиск коллекционных почти ничего не находит?</b>",
+    "support.faq_q8": "<b>Как помогают маски и фильтры?</b>",
     "support.faq_a8": (
-        "Коллекционных имён очень мало, поэтому случайное угадывание почти не "
-        "попадает. Задайте маску под конкретное слово — или оставьте её пустой, "
-        "и бот покажет, что выставлено на рынке прямо сейчас."
+        "Маска целится в конкретную идею вместо случайных угадываний — "
+        "<code>*bot</code>, <code>neo?</code>, цифры в фиксированных местах. "
+        "Фильтры сужают по длине и цифрам. Целевой поиск находит настоящие, "
+        "брендовые имена куда быстрее грубого перебора."
     ),
-    "support.faq_q9": "<b>Почему бот иногда пишет, что Telegram его ограничивает?</b>",
+    "support.faq_q9": "<b>Почему бот иногда делает паузу или пишет, что Telegram его ограничивает?</b>",
     "support.faq_a9": (
-        "Telegram ограничивает, как часто один аккаунт может спрашивать про "
-        "юзернеймы. Когда лимит достигнут, бот прямо об этом сообщает и делает "
-        "паузу вместо того, чтобы выдавать занятые имена за свободные. "
-        "Ничего не потеряно — нажмите поиск снова через несколько минут."
+        "Telegram ограничивает, как часто один аккаунт может проверять юзернеймы. "
+        "Когда лимит достигнут, бот прямо об этом сообщает и ждёт вместо того, "
+        "чтобы выдавать занятые за свободные. Ничего не потеряно — просто запустите "
+        "поиск снова через пару минут."
     ),
     "support.faq_q10": "<b>Мои данные в безопасности?</b>",
     "support.faq_a10": (
-        "Бот хранит ваш Telegram id, настройки и историю поиска. "
-        "Ничего не передаётся третьим лицам."
+        "Бот хранит только ваш Telegram id, настройки и историю поиска. Ничего не "
+        "продаётся и не передаётся третьим лицам."
     ),
 
     # ---------------------------------------------------------------- new buttons
