@@ -20,6 +20,26 @@ from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
 
+# The repository root - the folder that holds .env and, most likely, any
+# session file the operator uploads next to the code.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _session_file(name: str, root: Path | None = None) -> Path:
+    """Locate a session file: working directory first, then the project root.
+
+    Deployments often run the bot from a different working directory than the
+    folder where the operator drops ``username_scanner_user.session``; both
+    places are checked before giving up.
+    """
+    local = Path(f"{name}.session")
+    if local.exists():
+        return local.resolve()
+    candidate = (root or PROJECT_ROOT) / f"{name}.session"
+    if candidate.exists():
+        return candidate
+    return local.resolve()
+
 # Telegram's own shape for a username (documented alongside USERNAME_INVALID):
 # r'[a-zA-Z][\w\d]{3,30}[a-zA-Z\d]'. Kept here for reference and diagnostics;
 # the resolver no longer branches on it, because a shape-valid handle can still
@@ -301,10 +321,13 @@ class MtprotoClient:
         names = settings.user_session_names
         found = 0
         for name in names:
-            if not name or not Path(f"{name}.session").exists():
+            if not name:
+                continue
+            path = _session_file(name)
+            if not path.exists():
                 continue
             try:
-                client = TelegramClient(name, settings.api_id, settings.api_hash)
+                client = TelegramClient(str(path), settings.api_id, settings.api_hash)
                 await client.connect()
                 if not await client.is_user_authorized():
                     await client.disconnect()
@@ -324,10 +347,15 @@ class MtprotoClient:
         if found:
             logger.info("user session pool ready (%d account(s)) - claimability on", found)
         else:
-            logger.info(
-                "no user session found (%s) - claimability check stays off; create "
-                "one with: python scripts/login_mtproto.py --user",
-                ", ".join(names) or "-",
+            # This is the exact failure behind "the bot reports taken/cooldown
+            # names as free": without this session account.checkUsername cannot
+            # run. Say precisely where the file was expected.
+            logger.warning(
+                "no user session found - claimability check stays OFF. Searched "
+                "the working directory (%s) and the project root (%s) for %s. "
+                "Copy username_scanner_user.session into one of those folders "
+                "(exact name, no double .session extension) and restart.",
+                Path.cwd(), PROJECT_ROOT, " or ".join(f"{n}.session" for n in names) or "-",
             )
         return self.user_ready
 

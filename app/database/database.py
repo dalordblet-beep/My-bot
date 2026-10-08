@@ -48,7 +48,11 @@ def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
     try:
         cursor.execute("PRAGMA busy_timeout=30000")
         try:
-            mode = cursor.execute("PRAGMA journal_mode=WAL").fetchone()
+            # sqlite3's execute() returns the cursor itself, while the
+            # aiosqlite sync facade returns None - fetch from the cursor so
+            # both drivers work.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            mode = cursor.fetchone()
             if mode and str(mode[0]).lower() == "wal":
                 cursor.execute("PRAGMA synchronous=NORMAL")
         except Exception as exc:

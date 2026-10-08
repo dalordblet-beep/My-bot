@@ -161,7 +161,7 @@ async def run() -> None:
     logger.info("trap watcher running=%s interval=%ss", watcher.running, runtime.trap_interval)
 
     search_queue.start()
-    logger.info("search queue running=%s", search_queue.running)
+    logger.info("search runner running=%s", search_queue.running)
 
     daily_drop.start()
     logger.info("daily drop running=%s", daily_drop.running)
