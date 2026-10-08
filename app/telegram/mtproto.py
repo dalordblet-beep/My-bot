@@ -17,6 +17,7 @@ from typing import Any
 
 from app.config import settings
 from app.utils.logging_setup import get_logger
+from app.utils.ratelimit import RateLimiter
 
 logger = get_logger(__name__)
 
@@ -132,6 +133,11 @@ class MtprotoClient:
         # Each entry: {"name", "client", "ready", "cooldown_until"}.
         self._user_clients: list[dict[str, Any]] = []
         self._user_turn = 0
+        # checkUsername is a real account-level call with the same escalation
+        # threshold as resolveUsername - unpaced, one session would be flood
+        # limited within minutes of a busy short-name search. The pace is
+        # shared across the user-session pool.
+        self._user_limiter = RateLimiter(min_interval=settings.request_delay)
 
     @property
     def configured(self) -> bool:
@@ -148,10 +154,20 @@ class MtprotoClient:
 
     @property
     def bot_session_count(self) -> int:
-        """How many MTProto sessions are currently usable for resolves."""
-        return (1 if self._ready else 0) + sum(
-            1 for entry in self._bot_clients if entry["ready"]
+        """How many MTProto sessions can serve a resolve *right now*.
+
+        Parked (FloodWait-limited) sessions are excluded on purpose: the shared
+        request pace is divided by this number, so counting a session that
+        cannot answer would over-pace the ones that can - pushing each of them
+        past the safe per-account rate and straight into the next FloodWait.
+        """
+        now = asyncio.get_event_loop().time()
+        count = 1 if (self._ready and self._main_cooldown <= now) else 0
+        count += sum(
+            1 for entry in self._bot_clients
+            if entry["ready"] and entry["cooldown_until"] <= now
         )
+        return max(count, 1)
 
     @property
     def user_ready(self) -> bool:
@@ -380,6 +396,12 @@ class MtprotoClient:
         if not ready:
             return None
 
+        # The safe per-account rate divided by the number of live sessions:
+        # one session carries the whole pace, N sessions share it.
+        self._user_limiter.min_interval = max(
+            1.0, settings.request_delay / len(ready)
+        )
+
         now = asyncio.get_event_loop().time()
         order = ready[self._user_turn % len(ready):] + ready[: self._user_turn % len(ready)]
         self._user_turn += 1
@@ -388,6 +410,7 @@ class MtprotoClient:
             if entry["cooldown_until"] > now:
                 continue
             async with self._lock:
+                await self._user_limiter.acquire()
                 try:
                     return bool(await entry["client"](CheckUsernameRequest(username)))
                 except (UsernameInvalidError, UsernamePurchaseAvailableError):

@@ -128,6 +128,48 @@ async def test_pool_counts_only_ready_sessions(monkeypatch):
     assert client.resolve_ready is True  # the extra session still answers
 
 
+async def test_parked_sessions_do_not_inflate_the_shared_pace(monkeypatch):
+    """A FloodWait-parked session cannot serve a call, so it must not count
+    toward the pace divisor - counting it would over-pace the healthy ones
+    and push every account into its next FloodWait."""
+    import asyncio
+
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", FakeClient(lambda r: _occupied_response()), raising=False)
+    monkeypatch.setattr(
+        client, "_bot_clients",
+        [
+            _session("a", FakeClient(lambda r: _occupied_response())),
+            _session("b", FakeClient(lambda r: _occupied_response())),
+        ],
+        raising=False,
+    )
+    assert client.bot_session_count == 3
+
+    # Park the main session exactly the way resolve_username does.
+    monkeypatch.setattr(
+        client, "_main_cooldown",
+        asyncio.get_event_loop().time() + 999, raising=False,
+    )
+    assert client.bot_session_count == 2
+
+
+async def test_check_username_is_paced_per_user_session(monkeypatch):
+    """account.checkUsername runs on a real account - unpaced, one session
+    would be flood limited within minutes of a busy short-name search."""
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(
+        client, "_user_clients", [_session("u", FakeClient(lambda r: True))], raising=False
+    )
+    monkeypatch.setattr(settings, "request_delay", 3.0)
+
+    verdict = await client.check_username("whatever")
+
+    assert verdict is True
+    assert client._user_limiter.min_interval == pytest.approx(3.0)
+
+
 # -------------------------------------------------- degradation without dying
 async def test_flood_falls_back_to_account_free_signals(monkeypatch):
     """A full park must degrade to page+Bot API, not freeze every search."""

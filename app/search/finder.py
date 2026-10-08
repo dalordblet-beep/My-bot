@@ -90,9 +90,10 @@ SCREEN_CAP = 160
 # could consume the whole SCREEN_CAP and leave the guarantee pass with nothing to
 # do) is the bug that ended short searches in "everything is taken".
 GUARANTEE_SCREEN_CAP = 400
-# How many public pages to fetch at once. Kept modest on purpose: we are guests
-# on a public endpoint, and a burst invites a 429 for no real gain.
-SCREEN_BATCH = 6
+# How many public pages to fetch at once. t.me is a plain public endpoint with
+# no account behind it; 10 concurrent fetches stay polite while keeping the
+# page screen from becoming the slowest stage of a short-name hunt.
+SCREEN_BATCH = 10
 # How many *authoritative* MTProto confirmations one search may spend in total.
 # This is the scarce resource - Telegram escalates at roughly 20-30 resolves per
 # account per minute (production evidence via telethon-floodgate), and every
