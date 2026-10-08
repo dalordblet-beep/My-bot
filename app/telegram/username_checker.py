@@ -212,8 +212,15 @@ class UsernameChecker:
             # The safe per-account pace is shared across the whole session pool,
             # with a margin: these are fresh bot accounts, and running them at
             # the bare 20/min threshold got them FloodWaited under load.
-            self._limiter.min_interval = mtproto_client.call_interval
-            await self._limiter.acquire()
+            #
+            # The pace is only paid when a session can actually take the call.
+            # With every bot session parked the resolve goes nowhere anyway, and
+            # waiting for the pool's (deliberately backed-off) interval first
+            # froze the whole check behind a multi-hour ban - two lookups in five
+            # minutes while the user session sat idle and able to answer.
+            if mtproto_client.resolve_sessions_live:
+                self._limiter.min_interval = mtproto_client.call_interval
+                await self._limiter.acquire()
             mt = await mtproto_client.resolve_username(name)
 
             if mt.kind == "not_occupied":

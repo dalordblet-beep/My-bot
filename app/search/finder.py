@@ -450,6 +450,18 @@ class UsernameFinder:
         """
         screened_here = 0
         while screened_here < screen_cap and state.confirmations < budget:
+            # The budget is a ceiling on *work*, but a search also has a wall
+            # clock. With the pool parked every confirmation is paid on the user
+            # session, so a hopeless request (a five-letter name with digits off,
+            # say) could otherwise sit on the screen for many minutes. Stopping
+            # on time ends it with an honest answer and the hint that helps.
+            if state.deadline and asyncio.get_event_loop().time() > state.deadline:
+                logger.info(
+                    "search stopped: time budget spent after %d confirmation(s), "
+                    "%d screened", state.confirmations, state.screened,
+                )
+                break
+
             batch: list[str] = []
             for name in candidates:
                 batch.append(name)

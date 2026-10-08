@@ -554,6 +554,45 @@ async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, mon
     assert attempt.generated_tries > 1, "the search gave up without trying"
 
 
+async def test_a_hopeless_search_ends_on_time_not_on_the_budget(bot, monkeypatch):
+    """A search also has a wall clock, not just a work budget.
+
+    When the bot pool is parked every confirmation is paid on the user session,
+    so a request that cannot be satisfied - a five-letter name with digits off is
+    the classic - would otherwise sit on the screen for many minutes before the
+    confirmation budget ran out. Ending on time gives the user an answer and the
+    hint that actually helps.
+    """
+    import time
+
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    # A budget so large the only thing that can stop the run is the clock.
+    monkeypatch.setattr(finder_module, "FREE_CONFIRM_BUDGET", 1_000_000)
+    monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.3)
+
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+
+    async def occupied(name):
+        return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+
+    checker.confirm_availability = occupied
+    finder = UsernameFinder(checker, None)
+
+    started = time.monotonic()
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=8)), timeout=15
+    )
+    elapsed = time.monotonic() - started
+
+    assert attempt.hit is False
+    assert elapsed < 5.0, f"the search ran for {elapsed:.1f}s past its clock"
+    assert attempt.reason in ("all_taken", "unconfirmed")
+    assert attempt.generated_tries > 0
+
+
 async def test_unlimited_mode_still_funds_the_guarantee_pass(bot, monkeypatch):
     """In unlimited mode the valuable pass used to claim ``min(500, budget)`` -
     which *is* the whole budget - so the guarantee pass never ran and the search

@@ -30,6 +30,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PACE_DECAY_SECONDS = 600.0
 _PACE_MULTIPLIER_CAP = 16.0
 _PACE_BASE_MARGIN = 2.0
+# An absolute ceiling on the shared interval. Without it, a fully parked pool
+# (divisor 1) combined with the 16x backoff produced a 96-second wait between
+# calls - so a search that could still be answered by the user session sat there
+# doing two checks in five minutes. Slowing down must never look like a hang.
+_INTERVAL_CAP = 20.0
 
 # How many pending join requests to read in one page when checking whether a
 # specific user is in the queue. The queue of a channel that approves by hand is
@@ -165,6 +170,7 @@ class MtprotoClient:
         # flood-free minutes recover it.
         self._pace_multiplier = 1.0
         self._last_flood_at = 0.0
+        self._pool_empty_logged = False
         # Optional pool of user sessions, used only for account.checkUsername.
         # Each entry: {"name", "client", "ready", "cooldown_until"}.
         self._user_clients: list[dict[str, Any]] = []
@@ -193,6 +199,25 @@ class MtprotoClient:
         return self._ready or any(entry["ready"] for entry in self._bot_clients)
 
     @property
+    def resolve_sessions_live(self) -> int:
+        """How many sessions can serve a resolve *right now* (parked excluded).
+
+        Zero is a real, important state: every bot session is sitting out a
+        FloodWait, so a resolve would go nowhere. Callers must not wait on the
+        pool's pace in that case - they should fall straight through to the user
+        session, which has a quota of its own and can still answer.
+        """
+        now = asyncio.get_event_loop().time()
+        count = 0
+        if self._ready and self._client is not None and self._main_cooldown <= now:
+            count += 1
+        count += sum(
+            1 for entry in self._bot_clients
+            if entry["ready"] and entry["cooldown_until"] <= now
+        )
+        return count
+
+    @property
     def bot_session_count(self) -> int:
         """How many MTProto sessions can serve a resolve *right now*.
 
@@ -201,13 +226,7 @@ class MtprotoClient:
         cannot answer would over-pace the ones that can - pushing each of them
         past the safe per-account rate and straight into the next FloodWait.
         """
-        now = asyncio.get_event_loop().time()
-        count = 1 if (self._ready and self._main_cooldown <= now) else 0
-        count += sum(
-            1 for entry in self._bot_clients
-            if entry["ready"] and entry["cooldown_until"] <= now
-        )
-        return max(count, 1)
+        return max(self.resolve_sessions_live, 1)
 
     @property
     def call_interval(self) -> float:
@@ -219,15 +238,21 @@ class MtprotoClient:
         top of the base margin the pace is **adaptive**: every FloodWait doubles
         the multiplier (capped), and ten flood-free minutes reset it - the pool
         slows itself down until Telegram stops complaining, then speeds back.
+
+        The result is capped: a big backoff is meant to be cautious, not to make
+        a search look frozen.
         """
         now = asyncio.get_event_loop().time()
         if self._pace_multiplier > 1.0 and now - self._last_flood_at > _PACE_DECAY_SECONDS:
             self._pace_multiplier = 1.0
             logger.info("session pool pace recovered after %.0f flood-free seconds", _PACE_DECAY_SECONDS)
-        return max(
-            0.35,
-            settings.request_delay * _PACE_BASE_MARGIN * self._pace_multiplier
-            / max(1, self.bot_session_count),
+        return min(
+            _INTERVAL_CAP,
+            max(
+                0.35,
+                settings.request_delay * _PACE_BASE_MARGIN * self._pace_multiplier
+                / self.bot_session_count,
+            ),
         )
 
     def _register_flood(self) -> None:
@@ -404,6 +429,7 @@ class MtprotoClient:
         self._main_cooldown = 0.0
         self._pace_multiplier = 1.0
         self._last_flood_at = 0.0
+        self._pool_empty_logged = False
         self._user_clients = []
         self._user_turn = 0
 
@@ -698,6 +724,22 @@ class MtprotoClient:
                     break
         # Every flood is a signal the load is hot: back the whole pool off.
         self._register_flood()
+
+        # A fully parked pool is worth shouting about exactly once: searches keep
+        # working on the user session, but much more slowly, and the operator
+        # needs to know why instead of discovering it through a "slow" search.
+        if not self.resolve_sessions_live and not self._pool_empty_logged:
+            self._pool_empty_logged = True
+            wait = self._soonest_recovery() or 0.0
+            logger.error(
+                "every resolve session is FloodWait-parked (soonest recovery in "
+                "%.0fs, ~%.1fh). Availability checks now run on the user session "
+                "alone - they still work, but at that account's own quota.",
+                wait, wait / 3600.0,
+            )
+        elif self.resolve_sessions_live and self._pool_empty_logged:
+            self._pool_empty_logged = False
+            logger.info("a resolve session is back - the pool is serving again")
 
     def _soonest_recovery(self) -> float | None:
         """Seconds until some parked session becomes usable again."""

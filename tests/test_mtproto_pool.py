@@ -168,6 +168,63 @@ async def test_parked_bot_pool_falls_back_to_the_user_session(monkeypatch):
     assert result.detail == "claimability_verified"
 
 
+async def test_a_fully_parked_pool_does_not_freeze_the_check(monkeypatch):
+    """Every session parked must not cost the caller the pool's backed-off pace.
+
+    A resolve cannot go anywhere when the whole pool is sitting out a FloodWait,
+    yet the check still waited for the shared interval first - and with the
+    divisor at 1 and the 16x backoff that interval was 96 seconds. Two lookups
+    took five minutes while the user session sat idle and perfectly able to
+    answer. Now the pace is only paid when a session can actually take the call.
+    """
+    import time
+
+    client = mtproto_module.mtproto_client
+
+    async def all_parked(name):
+        return MtprotoResult("flood", "26000")
+
+    async def claimable(name):
+        return True
+
+    monkeypatch.setattr(client, "resolve_username", all_parked, raising=False)
+    monkeypatch.setattr(client, "check_username", claimable, raising=False)
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", None, raising=False)
+    monkeypatch.setattr(client, "_bot_clients", [], raising=False)
+    client._pace_multiplier = 16.0
+
+    assert client.resolve_sessions_live == 0
+
+    checker = UsernameChecker(
+        cache=None, bot=None, rate_limiter=RateLimiter(min_interval=0.0),
+        page_probe=FakePageProbe(state="unknown"),
+    )
+    started = time.monotonic()
+    result = await checker.check_free_candidate("somefree")
+    elapsed = time.monotonic() - started
+
+    # The user session answered, and it did so without queueing behind the pool.
+    assert result.status is CheckStatus.AVAILABLE
+    assert result.detail == "claimability_verified"
+    assert elapsed < 2.0, f"the check waited on a parked pool for {elapsed:.1f}s"
+
+
+def test_the_backoff_never_looks_like_a_hang(monkeypatch):
+    """A big backoff is meant to be cautious, not to make a search look frozen."""
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", None, raising=False)
+    monkeypatch.setattr(client, "_bot_clients", [], raising=False)
+    monkeypatch.setattr(settings, "request_delay", 3.0)
+    client._pace_multiplier = 16.0
+    client._last_flood_at = asyncio.get_event_loop().time()
+
+    assert client.resolve_sessions_live == 0
+    # Without the ceiling this was 3.0 * 2.0 * 16 / 1 == 96 seconds.
+    assert client.call_interval <= mtproto_module._INTERVAL_CAP
+
+
 async def test_pool_counts_only_ready_sessions(monkeypatch):
     client = mtproto_module.mtproto_client
     monkeypatch.setattr(client, "_ready", True, raising=False)
@@ -325,11 +382,14 @@ def test_flood_backs_the_pool_pace_off_and_it_recovers(monkeypatch):
     base = client.call_interval
     assert base == pytest.approx(3.0 * 2.0)
 
-    # A flood doubles the interval; another one doubles it again.
+    # A flood doubles the interval; another one doubles it again - up to the
+    # ceiling, which exists so a cautious pace never reads as a frozen screen.
     client._park("main", 60)
     assert client.call_interval == pytest.approx(base * 2)
     client._park("main", 60)
-    assert client.call_interval == pytest.approx(base * 4)
+    assert client.call_interval == pytest.approx(
+        min(base * 4, mtproto_module._INTERVAL_CAP)
+    )
 
     # Ten flood-free minutes recover the full speed.
     client._last_flood_at = asyncio.get_event_loop().time() - 601
