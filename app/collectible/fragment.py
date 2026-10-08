@@ -19,6 +19,7 @@ answers and are reported as such.
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 
 from app.config import settings
@@ -75,11 +76,39 @@ class FragmentListing:
     url: str
 
 
+@dataclass
+class MarketStats:
+    """Live asking-price summary for a slice of the Fragment market."""
+
+    length: int | None
+    count: int
+    low: float
+    median: float
+    high: float
+
+
+def _ton_value(text: str | None) -> float | None:
+    if not text:
+        return None
+    match = re.search(r"([\d][\d\s.,]*)", text)
+    if not match:
+        return None
+    raw = match.group(1).replace(" ", "").replace(",", "")
+    try:
+        return float(raw)
+    except ValueError:
+        return None
+
+
 class FragmentClient:
     def __init__(self, timeout: float | None = None, enabled: bool | None = None) -> None:
         self._timeout = timeout or settings.fragment_timeout
         self._enabled = settings.fragment_enabled if enabled is None else enabled
         self._session = None
+        # The whole live listing set, cached briefly. Valuations and market
+        # stats all read from it, so a burst of requests costs one fetch.
+        self._market_cache: list[FragmentListing] | None = None
+        self._market_until = 0.0
 
     @property
     def enabled(self) -> bool:
@@ -300,3 +329,60 @@ class FragmentClient:
             if limit and len(out) >= limit:
                 break
         return out
+
+    # ------------------------------------------------------------------ market
+    async def market_listings(self, ttl: float = 600.0) -> list[FragmentListing]:
+        """Every collectible currently listed, cached for ``ttl`` seconds.
+
+        Raw material for every price signal (comparables, market stats,
+        valuation). One fetch is reused across all of them, so the bot stays a
+        light guest on Fragment even when many users ask at once.
+        """
+        now = time.monotonic()
+        if self._market_cache is not None and now < self._market_until:
+            return self._market_cache
+        listings = await self.browse("", limit=0)
+        if listings:
+            self._market_cache = listings
+            self._market_until = now + ttl
+        return listings
+
+    async def market_stats(self, length: int | None = None) -> MarketStats | None:
+        """Live asking prices on Fragment, optionally for one name length.
+
+        Fragment lists current auctions together with their minimum bid.
+        Aggregating the live listings by length is a real, honest market signal
+        ("names this short are asking X-Y right now, median Z") rather than a
+        guess. It is *asking* price, not sold price, and is reported as such.
+        """
+        listings = await self.market_listings()
+        values: list[float] = []
+        for item in listings:
+            if length is not None and len(item.name) != length:
+                continue
+            value = _ton_value(item.min_bid)
+            if value and value > 0:
+                values.append(value)
+        if not values:
+            return None
+        values.sort()
+        n = len(values)
+        median = values[n // 2] if n % 2 else (values[n // 2 - 1] + values[n // 2]) / 2
+        return MarketStats(
+            length=length, count=n, low=values[0], median=median, high=values[-1]
+        )
+
+    async def sold_highlights(self, length: int, limit: int = 3) -> list[FragmentListing]:
+        """The most expensive currently-listed names of a given length.
+
+        A concrete anchor for "what do names like this actually go for" - real
+        listings, not a model.
+        """
+        listings = await self.market_listings()
+        scored = [
+            (item, _ton_value(item.min_bid) or 0.0)
+            for item in listings
+            if len(item.name) == length
+        ]
+        scored.sort(key=lambda pair: pair[1], reverse=True)
+        return [item for item, _ in scored[:limit]]

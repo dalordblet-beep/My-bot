@@ -23,15 +23,19 @@ and potentially valuable, not random" is a requirement, not a preference.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import random
 from dataclasses import asdict, dataclass
 from typing import Iterator
 
 from app.collectible.checker import CollectibleChecker
+from app.collectible.valuation import estimate_price
 from app.search.generator import (
     UsernameGenerator,
     beautiful_candidates,
+    broad_candidates,
     coinage_candidates,
+    letter_part,
 )
 from app.search.pattern import (
     Premium,
@@ -79,21 +83,35 @@ VARIANTS_CAP = 8
 # which costs nothing - no account, no quota, nothing to ban - so the net can be
 # broad. t.me answers a plain GET in ~340ms.
 SCREEN_CAP = 160
+# The guarantee pass gets its own, larger screening allowance. Screening is free
+# and it is exactly what finds a *free* name without spending the scarce MTProto
+# budget, so starving it (which the old shared counter did - the valuable pass
+# could consume the whole SCREEN_CAP and leave the guarantee pass with nothing to
+# do) is the bug that ended short searches in "everything is taken".
+GUARANTEE_SCREEN_CAP = 400
 # How many public pages to fetch at once. Kept modest on purpose: we are guests
 # on a public endpoint, and a burst invites a 429 for no real gain.
 SCREEN_BATCH = 6
 # How many *authoritative* MTProto confirmations one search may spend in total.
 # This is the scarce resource - Telegram escalates at roughly 20-30 resolves per
 # account per minute (production evidence via telethon-floodgate), and every
-# call is paced by REQUEST_DELAY. 10 calls at a safe 3s interval is ~30s worst
-# case, which still stays under the escalation threshold.
-FREE_CONFIRM_BUDGET = 10
+# call is paced by REQUEST_DELAY, so the budget costs time, not ban risk. The
+# search stops early on a hit; the budget is only fully spent when candidates
+# keep coming back occupied.
+FREE_CONFIRM_BUDGET = 16
 # How much of that total the desirable real-word stream may claim before the
 # guarantee pass takes over. Real words are what a user actually wants, so they
 # get first refusal - but they are also almost all taken, so they must not be
 # allowed to burn the whole budget and end the search with "everything taken".
 # The remainder is reserved for the coinage guarantee.
 VALUABLE_CONFIRM_BUDGET = 5
+# Short names are a different world: 5-6 letter handles are the most squatted
+# space on Telegram, so per-confirmation success collapses and a base budget
+# would end in "all taken" far too often. Short searches get more attempts -
+# pacing keeps the request rate identical, only the worst-case wait grows, and
+# the progress screen exists precisely to make that wait bearable.
+SHORT_NAME_LENGTH = 6
+SHORT_NAME_CONFIRM_BUDGET = 30
 # If a FloodWait is longer than this, do not sit on it: a search the user is
 # waiting on must answer now and say "Telegram is throttling us", not hang.
 # A multi-minute wait is not a search, it is a stuck screen.
@@ -164,6 +182,17 @@ class UsernameFinder:
         self._collectible = collectible
         self._rng = rng or random.Random()
 
+    async def _price(self, name: str) -> int | None:
+        """One-number market estimate from live Fragment comparables."""
+        if self._collectible is None:
+            return None
+        try:
+            listings = await self._collectible.fragment.market_listings()
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.debug("price estimate failed for %s: %s", name, exc)
+            return None
+        return estimate_price(name, listings)
+
     def _candidates(self, criteria: SearchCriteria):
         """An ordered iterator of candidate names that satisfy local filters.
 
@@ -202,14 +231,19 @@ class UsernameFinder:
             rng=self._rng,
             limit=MAX_GENERATION_TRIES,
         ):
-            if premium_rating(name).total >= PREMIUM_FLOOR:
+            # Taste judges the letters; digits are the user's own filter.
+            if premium_rating(letter_part(name)).total >= PREMIUM_FLOOR:
                 yield name
 
-    async def find_one(self, criteria: SearchCriteria) -> FindAttempt:
+    async def find_one(self, criteria: SearchCriteria, progress=None) -> FindAttempt:
+        """Run a search. ``progress``, when given, is called as
+        ``progress(phase, confirmations, budget, screened)`` after every
+        authoritative check so a caller can animate the wait with real numbers
+        instead of a fake spinner."""
         if criteria.target == TARGET_VARIANTS:
             return await self._find_variants(criteria)
 
-        return await self._find_free(criteria)
+        return await self._find_free(criteria, progress)
 
     async def _screen(self, names: list[str]) -> list[str]:
         """Drop the names the free public page proves occupied.
@@ -261,27 +295,65 @@ class UsernameFinder:
             return True, True
         return True, False
 
-    def _guarantee_candidates(self, criteria: SearchCriteria) -> Iterator[str]:
-        """The guarantee stream: clean coinages that fit the user's criteria.
+    def _confirm_budget(self, criteria: SearchCriteria) -> int:
+        """Total confirmations this search may spend, by name length."""
+        if criteria.length is not None and criteria.length <= SHORT_NAME_LENGTH:
+            return max(FREE_CONFIRM_BUDGET, SHORT_NAME_CONFIRM_BUDGET)
+        return FREE_CONFIRM_BUDGET
 
-        Real words are what a user wants and almost all of them are taken. These
-        are the opposite trade - invented, but readable, and effectively never
-        registered - so the search can always end on a free name. They go through
-        the identical length / digit / score / premium gates, so the guarantee
-        never hands back a name the bot's own taste would have rejected.
+    def _guarantee_candidates(self, criteria: SearchCriteria) -> Iterator[str]:
+        """The guarantee stream: names that are actually still free.
+
+        Real words are what a user wants and almost all of them are taken. The
+        guarantee leans on two invented sources instead, interleaved so neither
+        can starve the other:
+
+        * **coinages** - readable, brandable; preferred, but at five characters
+          the pronounceable space is exhausted (measured: thirty coinages ->
+          twenty occupied, ten unassignable, *zero* free);
+        * **broad** - arbitrary full-alphabet handles, which is where a free
+          short name actually lives (a random five-letter draw was claimable
+          about one time in six).
+
+        Both go through the identical length / digit / score / premium gates, so
+        the guarantee never hands back a name the bot's own taste would reject.
         """
-        for name in coinage_candidates(
-            length=criteria.length,
-            allow_digits=criteria.allow_digits,
-            min_score=QUALITY_FLOOR,
-            rng=self._rng,
-            limit=MAX_GENERATION_TRIES * 4,
-        ):
-            if premium_rating(name).total >= PREMIUM_FLOOR:
-                yield name
+        def gated(stream: Iterator[str]) -> Iterator[str]:
+            for name in stream:
+                if premium_rating(letter_part(name)).total >= PREMIUM_FLOOR:
+                    yield name
+
+        streams = [
+            gated(coinage_candidates(
+                length=criteria.length,
+                allow_digits=criteria.allow_digits,
+                min_score=QUALITY_FLOOR,
+                rng=self._rng,
+                limit=MAX_GENERATION_TRIES * 4,
+            )),
+            gated(broad_candidates(
+                length=criteria.length,
+                allow_digits=criteria.allow_digits,
+                min_score=QUALITY_FLOOR,
+                rng=self._rng,
+                limit=MAX_GENERATION_TRIES * 8,
+            )),
+        ]
+        iters = [iter(stream) for stream in streams]
+        done = [False] * len(iters)
+        while not all(done):
+            for index, iterator in enumerate(iters):
+                if done[index]:
+                    continue
+                candidate = next(iterator, None)
+                if candidate is None:
+                    done[index] = True
+                else:
+                    yield candidate
 
     async def _sweep(
-        self, candidates: Iterator[str], budget: int, state: _SweepState
+        self, candidates: Iterator[str], budget: int, state: _SweepState,
+        progress=None, phase: str = "valuable", screen_cap: int = SCREEN_CAP,
     ) -> FindAttempt | None:
         """Screen and confirm candidates until one is free or the budget is spent.
 
@@ -291,9 +363,12 @@ class UsernameFinder:
 
         ``budget`` is a ceiling on ``state.confirmations``, so several sweeps in
         one search share a single MTProto allowance instead of each taking their
-        own.
+        own. ``screen_cap`` is the *per-sweep* screening ceiling - it must be
+        local, not the shared ``state.screened``, or the first pass can spend the
+        whole allowance and leave the guarantee pass unable to look at anything.
         """
-        while state.screened < SCREEN_CAP and state.confirmations < budget:
+        screened_here = 0
+        while screened_here < screen_cap and state.confirmations < budget:
             batch: list[str] = []
             for name in candidates:
                 batch.append(name)
@@ -305,12 +380,13 @@ class UsernameFinder:
             # Remember the best-looking candidate so a total miss can still be
             # explained ("everything this good is taken") rather than blank.
             for name in batch:
-                premium = premium_rating(name)
+                premium = premium_rating(letter_part(name))
                 if state.best_premium is None or premium.total > state.best_premium.total:
                     state.best, state.best_premium = name, premium
 
             survivors = await self._screen(batch)
             state.screened += len(batch)
+            screened_here += len(batch)
             state.occupied_seen += len(batch) - len(survivors)
 
             for name in survivors:
@@ -319,6 +395,9 @@ class UsernameFinder:
 
                 basic = await self._checker.confirm_availability(name)
                 state.confirmations += 1
+                if progress is not None:
+                    with contextlib.suppress(Exception):
+                        progress(phase, state.confirmations, budget, state.screened)
 
                 if basic.status is CheckStatus.AVAILABLE:
                     # Telegram is done - now Fragment gets its say.
@@ -329,12 +408,12 @@ class UsernameFinder:
                         continue
                     return FindAttempt(
                         username=name,
-                        premium=premium_rating(name),
+                        premium=premium_rating(letter_part(name)),
                         hit=True,
                         reason="free_found",
                         basic=basic,
                         generated_tries=state.screened,
-                        value=estimate_value(name),
+                        value={**estimate_value(name), "price": await self._price(name)},
                         fragment_clear=fragment_clear,
                         fragment_checked=fragment_checked,
                     )
@@ -366,7 +445,9 @@ class UsernameFinder:
 
         return None
 
-    async def _find_free(self, criteria: SearchCriteria) -> FindAttempt:
+    async def _find_free(
+        self, criteria: SearchCriteria, progress=None
+    ) -> FindAttempt:
         """Walk candidates until one survives **both** checks.
 
         Three channels, deliberately split:
@@ -409,17 +490,24 @@ class UsernameFinder:
                 reason="throttled", generated_tries=0,
             )
 
+        budget = self._confirm_budget(criteria)
+
         # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
-        valuable_budget = min(VALUABLE_CONFIRM_BUDGET, FREE_CONFIRM_BUDGET)
-        stopped = await self._sweep(self._candidates(criteria), valuable_budget, state)
+        valuable_budget = min(VALUABLE_CONFIRM_BUDGET, budget)
+        stopped = await self._sweep(
+            self._candidates(criteria), valuable_budget, state, progress, "valuable"
+        )
         if stopped is not None:
             return stopped
 
         # Pass 2: the guarantee. Whatever budget is left goes to the stream that
         # is effectively always free, so the search ends on a name, not an excuse.
-        if state.confirmations < FREE_CONFIRM_BUDGET:
+        # It screens with its own, larger allowance - screening is free and is
+        # what lets the guarantee find a free coinage without touching MTProto.
+        if state.confirmations < budget:
             stopped = await self._sweep(
-                self._guarantee_candidates(criteria), FREE_CONFIRM_BUDGET, state
+                self._guarantee_candidates(criteria), budget, state, progress,
+                "guarantee", GUARANTEE_SCREEN_CAP,
             )
             if stopped is not None:
                 return stopped
@@ -535,11 +623,11 @@ class UsernameFinder:
                     free.append(
                         FindAttempt(
                             username=name,
-                            premium=premium_rating(name),
+                            premium=premium_rating(letter_part(name)),
                             hit=True,
                             reason="free_found",
                             basic=basic,
-                            value=estimate_value(name),
+                            value={**estimate_value(name), "price": await self._price(name)},
                             fragment_clear=fragment_clear,
                             fragment_checked=fragment_checked,
                         )

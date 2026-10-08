@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from dataclasses import dataclass, field
 
 from aiogram import Bot
@@ -35,7 +36,13 @@ from app.bot.keyboards.features_kb import (
 from app.collectible.checker import CollectibleChecker
 from app.database import repository as repo
 from app.database.database import session_scope
-from app.search.finder import SearchCriteria, TARGET_VARIANTS, UsernameFinder
+from app.search.finder import (
+    SCREEN_CAP,
+    SearchCriteria,
+    TARGET_VARIANTS,
+    UsernameFinder,
+)
+from app.services.i18n import t
 from app.telegram.username_checker import UsernameChecker
 from app.utils.enums import Privilege
 from app.utils.logging_setup import get_logger
@@ -54,6 +61,22 @@ DEFAULT_PRIORITY = 30
 
 # Refuse to grow without bound if something goes wrong upstream.
 MAX_PENDING = 500
+
+# --- the live progress screen -------------------------------------------------
+# Telegram has no in-message widgets, so "animation" is a series of edits of
+# the placeholder message. The interval is deliberately above one edit per
+# couple of seconds: Telegram throttles edits, and the search's own MTProto
+# pacing means nothing meaningful changes faster anyway.
+ANIMATE_INTERVAL = 2.0
+BAR_CELLS = 16
+SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# The bar has three glyphs: filled progress, empty track, and a scan-head that
+# keeps travelling through the empty part. The head is the trick that makes the
+# screen feel alive while the *real* numbers barely move (MTProto pacing is
+# slow): even when progress stalls, the user sees motion and knows it is working.
+_BAR_FILLED = "▰"
+_BAR_EMPTY = "▱"
+_BAR_HEAD = "◆"
 
 
 def priority_for(privilege: str | None) -> int:
@@ -199,7 +222,23 @@ class SearchQueue:
 
     async def _process(self, job: SearchJob) -> None:
         finder = UsernameFinder(self._checker, self._collectible)
-        attempt = await finder.find_one(job.criteria)
+        # Live counters for the progress screen; the finder's callback keeps
+        # them truthful (real confirmations, real screening counts).
+        snapshot = {"phase": "valuable", "confirmations": 0, "budget": 0, "screened": 0}
+
+        def progress(phase: str, confirmations: int, budget: int, screened: int) -> None:
+            snapshot.update(
+                phase=phase, confirmations=confirmations, budget=budget, screened=screened
+            )
+
+        stop = asyncio.Event()
+        animator = asyncio.create_task(self._animate(job, snapshot, stop))
+        try:
+            attempt = await finder.find_one(job.criteria, progress)
+        finally:
+            stop.set()
+            with contextlib.suppress(asyncio.CancelledError):
+                await animator
 
         async with session_scope() as session:
             user = await repo.get_user_by_telegram_id(session, job.user_id)
@@ -215,6 +254,75 @@ class SearchQueue:
         if job.kind == "digest":
             body = f"{texts.digest_header(job.lang)}\n\n{body}"
         await self._deliver(job, body, keyboard)
+
+    # ------------------------------------------------------------------ progress
+    async def _animate(self, job: SearchJob, snapshot: dict, stop: asyncio.Event) -> None:
+        """Keep the placeholder visibly alive while the search runs.
+
+        The wait cannot be removed - MTProto pacing is physical - but a screen
+        that breathes is the difference between waiting and abandoning. The bar
+        is driven by the finder's real counters, never invented: what moves is
+        what actually happened.
+        """
+        if job.message_id is None:
+            return
+        started = time.monotonic()
+        step = 0
+        while True:
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=ANIMATE_INTERVAL)
+                return
+            except asyncio.TimeoutError:
+                pass
+            step += 1
+            frame = self._progress_frame(job.lang, snapshot, started, step)
+            try:
+                await self._bot.edit_message_text(
+                    chat_id=job.chat_id,
+                    message_id=job.message_id,
+                    text=frame,
+                )
+            except Exception:
+                # The placeholder is gone (deleted, or the chat went cold) -
+                # stop feeding it. The result delivery has its own fallback.
+                return
+
+    @staticmethod
+    def _progress_frame(lang: str, snapshot: dict, started: float, step: int) -> str:
+        confirmations = snapshot["confirmations"]
+        budget = snapshot["budget"] or 1
+        screened = snapshot["screened"]
+        # Two truthful sources of motion: authoritative checks move the bar in
+        # jumps, free screening creeps it forward between them.
+        share = max(confirmations / budget, screened / SCREEN_CAP)
+        share = min(share, 0.99)
+        pct = max(1, round(share * 100))
+        filled = max(1, min(BAR_CELLS - 1, round(BAR_CELLS * share)))
+
+        # Fill the real progress, then run a scan-head through the empty track so
+        # the screen keeps breathing even between slow MTProto checks.
+        remaining = BAR_CELLS - filled
+        cells = [_BAR_FILLED] * filled + [_BAR_EMPTY] * remaining
+        if remaining > 0:
+            cells[filled + (step % remaining)] = _BAR_HEAD
+        bar = "".join(cells)
+
+        spinner = SPINNER_FRAMES[step % len(SPINNER_FRAMES)]
+        phase_key = (
+            "search.progress_phase_guarantee"
+            if snapshot["phase"] == "guarantee"
+            else "search.progress_phase_valuable"
+        )
+        seconds = int(time.monotonic() - started)
+        return "\n".join(
+            [
+                t(lang, "search.running"),
+                "",
+                f"<code>{bar}</code> <b>{pct}%</b>",
+                f"{spinner} {t(lang, phase_key)}",
+                t(lang, "search.progress_checked", n=confirmations, s=seconds),
+            ]
+        )
 
     @staticmethod
     def _result_keyboard(job: SearchJob, attempt):

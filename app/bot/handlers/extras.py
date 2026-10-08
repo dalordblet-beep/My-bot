@@ -14,6 +14,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.features_kb import (
     back_home_keyboard,
@@ -262,7 +263,7 @@ async def on_bulk(
 # --------------------------------------------------------------------- leaderboard
 @router.callback_query(F.data == cb.MENU_TOP)
 async def cb_top(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     names = list(await repo.recent_available_usernames(session, limit=400))
     scored = sorted(
@@ -281,7 +282,7 @@ async def cb_top(
         text = "\n".join(lines)
 
     if callback.message is not None:
-        await callback.message.edit_text(text, reply_markup=back_home_keyboard(lang))
+        await show_screen(callback, bot, text, keyboard=back_home_keyboard(lang))
 
 
 # --------------------------------------------------------------------- favourites
@@ -312,7 +313,7 @@ async def cb_fav_add(
 
 @router.callback_query(F.data == cb.MENU_FAVORITES)
 async def cb_favorites(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     rows = list(await repo.list_favorites(session, user))
     await callback.answer()
@@ -329,12 +330,12 @@ async def cb_favorites(
         text = "\n".join(lines)
 
     if callback.message is not None:
-        await callback.message.edit_text(text, reply_markup=favorites_keyboard(lang, rows))
+        await show_screen(callback, bot, text, keyboard=favorites_keyboard(lang, rows))
 
 
 @router.callback_query(F.data.startswith(f"{cb.FAV_DEL_PREFIX}:"))
 async def cb_fav_del(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     try:
         favorite_id = int((callback.data or "").split(":")[-1])
@@ -357,4 +358,4 @@ async def cb_fav_del(
         )
     )
     if callback.message is not None:
-        await callback.message.edit_text(text, reply_markup=favorites_keyboard(lang, rows))
+        await show_screen(callback, bot, text, keyboard=favorites_keyboard(lang, rows))

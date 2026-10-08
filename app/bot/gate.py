@@ -6,13 +6,16 @@ is shown whether the user arrived via a button or typed a command.
 
 from __future__ import annotations
 
+import os
+
 from aiogram import Bot
-from aiogram.types import InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, FSInputFile, InlineKeyboardMarkup, InputMediaPhoto, Message
 
 from app.bot import texts
 from app.bot.keyboards.captcha_kb import captcha_keyboard, captcha_retry_keyboard
 from app.bot.keyboards.main_menu import main_menu_keyboard
 from app.bot.keyboards.subscription_kb import subscriptions_keyboard
+from app.config import settings
 from app.services.access import (
     STEP_BANNED,
     STEP_CAPTCHA,
@@ -28,6 +31,7 @@ from app.telegram.bot_api import invite_link
 from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
+
 
 
 async def channel_join_url(bot: Bot) -> str | None:
@@ -127,9 +131,10 @@ async def render_gate(
         await _send(bot, chat_id, text, keyboard, edit_message_id)
         return
 
-    # Access granted - fall back to the menu.
-    await _send(
-        bot, chat_id, texts.main_menu(lang), main_menu_keyboard(lang, is_admin), edit_message_id
+    # Access granted - fall back to the menu. Single message: photo on top,
+    # caption underneath, inline keyboard attached to the same message.
+    await send_main_menu(
+        bot, chat_id, lang, is_admin=is_admin, edit_message_id=edit_message_id
     )
 
 
@@ -141,13 +146,52 @@ async def send_main_menu(
     edit_message_id: int | None = None,
     is_admin: bool = False,
 ) -> None:
-    await _send(
-        bot,
-        chat_id,
-        text if text is not None else texts.main_menu(lang),
-        main_menu_keyboard(lang, is_admin),
-        edit_message_id,
-    )
+    """The main menu: ONE Telegram message with the brand photo on top, a
+    short caption underneath, and the inline keyboard attached to that same
+    message. Editing an existing text message in place also converts it into
+    the photo+caption variant, so pressing Home does not leave a stale text
+    message behind. If the photo file is missing, falls back to a plain text
+    message with the keyboard - the menu is never dropped.
+    """
+    caption = text if text is not None else texts.main_menu_caption(lang)
+    keyboard = main_menu_keyboard(lang, is_admin)
+    await _send_main_menu(bot, chat_id, caption, keyboard, edit_message_id)
+
+
+async def _send_main_menu(
+    bot: Bot,
+    chat_id: int,
+    caption: str,
+    keyboard: InlineKeyboardMarkup,
+    edit_message_id: int | None,
+) -> None:
+    path = (settings.menu_image_path or "").strip()
+    if path and os.path.isfile(path):
+        photo = FSInputFile(path)
+        if edit_message_id is not None:
+            try:
+                await bot.edit_message_media(
+                    chat_id=chat_id,
+                    message_id=edit_message_id,
+                    media=InputMediaPhoto(media=photo, caption=caption, parse_mode="HTML"),
+                    reply_markup=keyboard,
+                )
+                return
+            except Exception as exc:
+                logger.debug(
+                    "edit_message_media failed, falling back to send_photo: %s", exc
+                )
+        await bot.send_photo(
+            chat_id=chat_id,
+            photo=photo,
+            caption=caption,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+        return
+
+    # No photo configured or file missing - plain text menu.
+    await _send(bot, chat_id, caption, keyboard, edit_message_id)
 
 
 async def _send(
@@ -176,6 +220,44 @@ async def safe_edit(message: Message, text: str, keyboard: InlineKeyboardMarkup 
         await message.edit_text(text, reply_markup=keyboard)
     except Exception:
         await message.answer(text, reply_markup=keyboard)
+
+
+async def show_screen(
+    callback: CallbackQuery,
+    bot: Bot,
+    text: str,
+    keyboard: InlineKeyboardMarkup | None = None,
+) -> None:
+    """Render a sub-screen in place of the current menu message.
+
+    Telegram refuses to edit a *photo* message into a *text* message, so if the
+    message the user pressed is the brand photo we delete it and send a fresh
+    text message instead - the photo must live only on the main menu, never on
+    a sub-screen. For an ordinary text message we edit it in place, falling back
+    to a new message if the edit fails (e.g. nothing changed, or the message
+    was already replaced by something else).
+
+    In tests the menu message is a plain text ``Message`` (it has no ``.photo``
+    attribute), so the edit path is taken and existing assertions keep passing.
+    """
+    msg = callback.message
+    if msg is not None and getattr(msg, "photo", None):
+        chat_id = msg.chat.id
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=msg.message_id)
+        except Exception as exc:  # best effort - the next send still shows the screen
+            logger.debug("deleting menu photo failed: %s", exc)
+        await bot.send_message(chat_id=chat_id, text=text, reply_markup=keyboard)
+        return
+    if msg is not None:
+        try:
+            await msg.edit_text(text, reply_markup=keyboard)
+            return
+        except Exception as exc:  # best effort
+            logger.debug("edit_message_text failed, sending new: %s", exc)
+    await bot.send_message(
+        chat_id=callback.from_user.id, text=text, reply_markup=keyboard
+    )
 
 
 def captcha_retry_markup(lang: str) -> InlineKeyboardMarkup:

@@ -182,7 +182,7 @@ async def test_start_flow_language_captcha_channel_chat_welcome(
     mock_session.reset()
     await feed(dispatcher, bot, make_update_callback(NEW_USER, "sub:check:chat"))
     assert "WELCOME" in mock_session.last_edited_text()
-    assert mock_session.last_keyboard_rows() == 5
+    assert mock_session.last_keyboard_rows() == 6
 
     user = await repo.get_user_by_telegram_id(session, NEW_USER)
     assert user.captcha_verified_at is not None
@@ -235,7 +235,7 @@ async def test_admin_also_passes_language_captcha_and_subscriptions(
 
     mock_session.reset()
     await feed(dispatcher, bot, make_update_message(ADMIN_USER, "/start", message_id=4))
-    assert mock_session.last_keyboard_rows() == 6
+    assert mock_session.last_keyboard_rows() == 7
 
 
 async def test_captcha_exhaustion_requires_new_check(

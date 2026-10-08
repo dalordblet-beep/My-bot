@@ -116,6 +116,10 @@ async def run() -> None:
                 "MTProto is configured but not authorised - availability checks will "
                 "return UNKNOWN until you run scripts/login_mtproto.py"
             )
+        # Optional: a real user session lets the engine call account.checkUsername,
+        # the only way to tell a claimable name from one Telegram refuses to
+        # assign. Absent, the engine stays best-effort.
+        await mtproto_client.start_user()
     else:
         logger.warning("MTProto is not configured - basic availability checks are limited")
 

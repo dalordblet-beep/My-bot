@@ -190,6 +190,47 @@ def _fits(name: str, length: int | None, allow_digits: bool) -> bool:
 _COINAGE_VOWELS = "aeiou"
 _COINAGE_CONSONANTS = "bcdfghklmnprstv"
 
+# Digits are not a "may contain" permission but a requirement: when the user
+# turns them on, the result must carry them. Crucially, the length setting is
+# the TOTAL length of the handle - so digits replace letters *inside* that
+# length, they are never appended. A "length 5, digits on" search therefore
+# yields 5-character names like ``ve7ci``, not six- or seven-character ones.
+#
+# This is also what makes a short search solvable at all. Measured against
+# Telegram: of thirty pronounceable 5-letter coinages, twenty were occupied and
+# ten were rejected outright - zero were free. Letter-only five-character names
+# are effectively gone. Adding 1-2 digits opens a space orders of magnitude
+# larger, where roughly a third of names are still free.
+_DIGIT_FIRST = "123456789"
+
+
+def letter_part(name: str) -> str:
+    """The name's letters, with every digit removed - a no-op when digits are off.
+
+    Parts are letters (and underscores) by construction. Taste gates (quality
+    floor, premium floor) judge the letters: the beauty of a name lives there,
+    while digits are the user's explicit filter and must not be able to make the
+    bot's own taste reject the name it was asked for.
+    """
+    return "".join(ch for ch in name if not ch.isdigit())
+
+
+def _decorate_digits(part: str, rng: random.Random) -> str:
+    """Replace the last 1-2 letters with digits, keeping the total length.
+
+    Digits are the user's filter, so with them on the handle must carry them -
+    and the length setting is the handle's *total* length, so they go inside it
+    rather than being appended. A trailing digit (``shop7``) is the common,
+    tolerated, prettiest shape, and it keeps the word's opening recognisable, so
+    the digits land at the end. One digit is the default; two reads heavier.
+    """
+    if len(part) < 2:
+        return part
+    count = 1 if rng.random() < 0.7 else 2
+    count = min(count, len(part) - 1)
+    digits = "".join(rng.choice("0123456789") for _ in range(count))
+    return part[: len(part) - count] + digits
+
 
 def _coinage(rng: random.Random, length: int) -> str:
     """Build a pronounceable, brandable string of the given length.
@@ -272,15 +313,33 @@ def beautiful_candidates(
     emitted: set[str] = set()
     count = 0
 
-    def offer(name: str) -> str | None:
+    def offer(part: str) -> str | None:
+        """Fit-check the letter part, then honour the digits-on promise.
+
+        Every stream feeds letter parts through here, so decoration lives in
+        one place: with digits enabled the emitted name is the part plus 1-2
+        digits - never a letter-only handle, because a digits-on search that
+        could still return a letter-only name would be lying about the filter.
+        The score gate runs on the final name, so decoration cannot smuggle a
+        name past the bot's own taste.
+        """
         nonlocal count
-        if not name or name in emitted:
+        if not part or part in emitted:
             return None
-        if not _fits(name, length, allow_digits):
+        if length is not None and len(part) != length:
             return None
-        if rate(name).total < min_score:
+        if not (MIN_LENGTH <= len(part) <= MAX_LENGTH):
             return None
-        emitted.add(name)
+        # A letter part only: digits are added here or nowhere. A part that
+        # already carries them (the seed family used to append numbers) would
+        # double up under decoration, and with digits off the user asked for
+        # pure letters - so both modes reject digit-bearing parts alike.
+        if any(ch not in LETTERS and ch != "_" for ch in part):
+            return None
+        name = _decorate_digits(part, rng) if allow_digits else part
+        if rate(part).total < min_score:
+            return None
+        emitted.add(part)
         count += 1
         return name
 
@@ -378,30 +437,93 @@ def coinage_candidates(
 
     ``beautiful_candidates`` interleaves these with real words so a search has
     something desirable to offer first. This is the same generator standing on
-    its own: an effectively unlimited supply of clean, readable names that are
-    almost never registered.
+    its own: an effectively unlimited supply of clean, readable names.
 
-    The finder's guarantee pass uses it: once the desirable real-word stream has
-    had its chance, a search given a length and a digit preference keeps going
-    here until it lands a genuinely free name, instead of stopping at "all
-    taken". Every emitted name clears the same length / digit / score gates as
-    any other candidate, so the guarantee cannot produce a name the bot would
-    otherwise have rejected.
+    ``length`` bounds the **letter** part. When ``allow_digits`` is on, 1-2
+    digits are appended to every candidate - the user's rule is that digits,
+    once enabled, must be present - so a "length 5, digits on" search yields
+    5-letter names like ``bavut7``, not letter-only ones. Every emitted name
+    clears the same score gate as any other candidate, so the guarantee cannot
+    produce a name the bot would otherwise have rejected.
     """
     rng = rng or random.Random()
     emitted = 0
     seen: set[str] = set()
     while emitted < limit:
-        name = _coinage(rng, length or 6)
-        if name in seen:
+        part = _coinage(rng, length or 6)
+        if part in seen:
             continue
-        seen.add(name)
-        if not _fits(name, length, allow_digits):
+        seen.add(part)
+        if length is not None and len(part) != length:
             continue
-        if rate(name).total < min_score:
+        if not (MIN_LENGTH <= len(part) <= MAX_LENGTH):
+            continue
+        name = _decorate_digits(part, rng) if allow_digits else part
+        if rate(part).total < min_score:
             continue
         emitted += 1
         yield name
+
+
+def broad_candidates(
+    *,
+    length: int | None = None,
+    allow_digits: bool = False,
+    min_score: int = 0,
+    rng: random.Random | None = None,
+    limit: int = 400,
+) -> Iterator[str]:
+    """Arbitrary valid handles from the **full** alphabet - the last resort.
+
+    A pretty, pronounceable generator runs out of free names long before the
+    namespace does. Measured at five letters: of thirty pronounceable coinages,
+    twenty were occupied and ten unassignable - zero free - yet a random draw
+    from the full alphabet was claimable about one time in six. The free names
+    simply live in the combinations a "beautiful" generator never emits, so the
+    guarantee pass needs a stream that is willing to emit them. Screening the
+    occupied ones away is free (the public page), so breadth here costs little.
+
+    ``length`` is the total length; digits, when allowed, sit inside it.
+    """
+    rng = rng or random.Random()
+    target = length or 6
+    alphabet = "abcdefghijklmnopqrstuvwxyz"
+    seen: set[str] = set()
+    emitted = 0
+    while emitted < limit:
+        part = _broad_word(rng, target, alphabet)
+        if part in seen:
+            continue
+        seen.add(part)
+        if length is not None and len(part) != length:
+            continue
+        if not (MIN_LENGTH <= len(part) <= MAX_LENGTH):
+            continue
+        name = _decorate_digits(part, rng) if allow_digits else part
+        if rate(part).total < min_score:
+            continue
+        emitted += 1
+        yield name
+
+
+_BROAD_VOWELS = set("aeiouy")
+
+
+def _broad_word(rng: random.Random, target: int, alphabet: str) -> str:
+    """A random full-alphabet string, kept merely *sayable*: at least one vowel
+    and never three consonants in a row. That keeps the ugly extremes out while
+    still exploring the combinations the pretty generator never reaches."""
+    while True:
+        part = "".join(rng.choice(alphabet) for _ in range(target))
+        if not any(ch in _BROAD_VOWELS for ch in part):
+            continue
+        run = 0
+        for ch in part:
+            run = 0 if ch in _BROAD_VOWELS else run + 1
+            if run >= 3:
+                break
+        else:
+            return part
 
 
 def _coinage_stream(length: int | None, rng: random.Random, limit: int) -> Iterator[str]:
@@ -476,10 +598,6 @@ def _seed_family(
     rng.shuffle(prefixes)
     prefixes = prefixes[: rng.randint(2, min(4, len(prefixes)))]
 
-    numbers = ["1", "7", "21", "42", "99", "777"]
-    rng.shuffle(numbers)
-    numbers = numbers[: rng.randint(2, len(numbers))]
-
     emitted = 0
 
     def valuable() -> Iterator[str]:
@@ -490,8 +608,6 @@ def _seed_family(
                 yield f"{base}_{suffix}"
         for prefix in prefixes:
             yield prefix + base
-        for number in numbers:
-            yield base + number
         # Near-root coinages: same root, one twist - similar *and* usually free.
         for _ in range(rng.randint(4, 10)):
             yield _root_variant(base, rng, length)

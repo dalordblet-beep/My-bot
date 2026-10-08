@@ -7,7 +7,12 @@ ownership and listing state is Fragment itself.
 Rules:
 * never invent an owner, price or listing state,
 * when a source is unavailable the answer is UNKNOWN,
-* a username that is provably unoccupied cannot be collectible.
+* **"unowned" does not mean "not a collectible".** A collectible can be owned
+  on-chain (its wallet holds the NFT) without being linked to any Telegram
+  account, so ``contacts.resolveUsername`` answers ``not_occupied`` for it. The
+  only source that knows is Fragment, so ownership is decided there - an
+  earlier shortcut that trusted ``not_occupied`` mislabelled real, listed names
+  (e.g. ``roundup`` at 556 TON) as "not listed".
 """
 
 from __future__ import annotations
@@ -46,20 +51,10 @@ class CollectibleChecker:
 
         name = parsed.value
 
-        # A name nobody owns cannot be a collectible.
-        if mtproto_client.ready:
-            mt = await mtproto_client.resolve_username(name)
-            if mt.kind == "not_occupied":
-                return CollectibleResult(
-                    username=name,
-                    status=CollectibleStatus.NOT_DETECTED,
-                    is_collectible=False,
-                    source="mtproto",
-                    reason="username_unoccupied",
-                )
-            if mt.kind in ("flood", "error", "unknown"):
-                logger.debug("collectible pre-check inconclusive for %s: %s", name, mt.kind)
-
+        # Fragment is the only source that knows ownership. Do NOT short-circuit
+        # on "not_occupied": an unassigned collectible (owned on-chain, not
+        # linked to any account) resolves exactly that way, yet is a real,
+        # listed name.
         lookup = await self._fragment.lookup(name)
 
         source = lookup.source or "fragment"

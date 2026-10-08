@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.features_kb import back_home_keyboard, support_keyboard
 from app.services.i18n import t
@@ -22,18 +23,20 @@ def support_url() -> str:
 
 
 @router.callback_query(F.data == cb.MENU_SUPPORT)
-async def cb_support(callback: CallbackQuery, lang: str = "en") -> None:
+async def cb_support(callback: CallbackQuery, bot: Bot, lang: str = "en") -> None:
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(
-            texts.support_screen(lang), reply_markup=support_keyboard(lang, support_url())
+        await show_screen(
+            callback, bot,
+            texts.support_screen(lang), keyboard=support_keyboard(lang, support_url())
         )
 
 
 @router.callback_query(F.data == cb.SUPPORT_FAQ)
-async def cb_faq(callback: CallbackQuery, lang: str = "en") -> None:
+async def cb_faq(callback: CallbackQuery, bot: Bot, lang: str = "en") -> None:
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(
-            texts.faq_screen(lang), reply_markup=support_keyboard(lang, support_url())
+        await show_screen(
+            callback, bot,
+            texts.faq_screen(lang), keyboard=support_keyboard(lang, support_url())
         )

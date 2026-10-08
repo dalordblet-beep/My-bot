@@ -153,7 +153,82 @@ def watch_keyboard(lang: str, watches: list) -> InlineKeyboardMarkup:
         [btn(t(lang, "watch.add"), icon="bell", style=SUCCESS, callback_data=cb.WATCH_ADD)]
     )
     rows.append(
+        [
+            btn(
+                t(lang, "watch.watch_listing"), icon="money", style=PRIMARY,
+                callback_data=cb.WATCH_LISTING,
+            )
+        ]
+    )
+    rows.append(
         [btn(t(lang, "btn.main_menu"), icon="home", style=NEUTRAL, callback_data=cb.MENU_HOME)]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def portfolio_keyboard(lang: str, items: list) -> InlineKeyboardMarkup:
+    """Each holding opens on Fragment; the cross removes it."""
+    rows = []
+    for item in items[:8]:
+        rows.append(
+            [
+                btn(
+                    f"@{item.username}", icon="money", style=PRIMARY,
+                    url=f"https://fragment.com/username/{item.username}",
+                ),
+                btn(
+                    t(lang, "btn.remove"), icon="cross_mark", style=DANGER,
+                    callback_data=f"{cb.PORT_DEL_PREFIX}:{item.id}",
+                ),
+            ]
+        )
+    rows.append(
+        [
+            btn(t(lang, "portfolio.add"), icon="star", style=SUCCESS, callback_data=cb.PORT_ADD),
+            btn(t(lang, "btn.refresh"), icon="refresh", style=NEUTRAL, callback_data=cb.PORT_REFRESH),
+        ]
+    )
+    rows.append(
+        [btn(t(lang, "btn.main_menu"), icon="home", style=NEUTRAL, callback_data=cb.MENU_HOME)]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def appraise_keyboard(lang: str, username: str, is_free: bool) -> InlineKeyboardMarkup:
+    """Actions for an appraisal: claim it, track it, or hunt alternatives."""
+    rows = []
+    if is_free:
+        rows.append(
+            [
+                btn(
+                    t(lang, "btn.open"), icon="link", style=SUCCESS,
+                    url=f"https://t.me/{username}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            btn(
+                t(lang, "btn.add_portfolio"), icon="money", style=PRIMARY,
+                callback_data=f"{cb.PORT_ADD_NAME_PREFIX}:{username}",
+            ),
+            btn(
+                t(lang, "btn.watch"), icon="eye", style=SUCCESS,
+                callback_data=f"{cb.WATCH_ADD_NAME_PREFIX}:{username}",
+            ),
+        ]
+    )
+    rows.append(
+        [
+            btn(
+                t(lang, "btn.variants"), icon="compass", style=NEUTRAL,
+                callback_data=f"{cb.FIND_VARIANTS_PREFIX}:{username}",
+            ),
+            btn(
+                t(lang, "btn.main_menu"), icon="home", style=NEUTRAL,
+                callback_data=cb.MENU_HOME,
+            ),
+        ]
     )
     return InlineKeyboardMarkup(inline_keyboard=rows)
 

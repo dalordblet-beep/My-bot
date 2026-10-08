@@ -213,6 +213,20 @@ class UsernameChecker:
             mt = await mtproto_client.resolve_username(name)
 
             if mt.kind == "not_occupied":
+                # "not occupied" is NOT the same as "claimable". Telegram also
+                # answers not_occupied for names it then refuses to assign
+                # (reserved, recently-released cooldown, anti-abuse), which the
+                # app reports as "incorrect username". account.checkUsername is
+                # the only method that separates the two, and only a *user*
+                # session may call it - so when one is configured, it gets the
+                # final word and an unassignable name is never reported free.
+                if mtproto_client.user_ready:
+                    claimable = await mtproto_client.check_username(name)
+                    if claimable is False:
+                        return CheckResult(
+                            username=name, status=CheckStatus.INVALID,
+                            source="mtproto_user", reason="not_assignable",
+                        )
                 return CheckResult(
                     username=name, status=CheckStatus.AVAILABLE, source="mtproto",
                     detail="no_owner",

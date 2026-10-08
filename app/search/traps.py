@@ -143,10 +143,13 @@ class TrapWatcher:
             try:
                 # Each kind has its own alert semantics. Lookups stay strictly
                 # sequential and evenly paced across all users.
-                if getattr(trap, "kind", "name") == "mask":
+                kind = getattr(trap, "kind", "name")
+                if kind == "mask":
                     hit = await self._sweep_mask(trap)
-                elif getattr(trap, "kind", "name") == "collectible":
+                elif kind == "collectible":
                     hit = await self._sweep_collectible(trap)
+                elif kind == "listing":
+                    hit = await self._sweep_listing(trap)
                 else:
                     hit = await self._sweep_name(trap)
                 if hit:
@@ -243,6 +246,46 @@ class TrapWatcher:
             return trap.username
         return None
 
+    async def _sweep_listing(self, trap) -> str | None:
+        """Watch a keyword on Fragment: notify when a NEW matching lot appears.
+
+        The first sweep only records the baseline - otherwise every existing
+        listing would fire at once. After that, any name that was not in the
+        seen set is a fresh listing worth a ping. The seen set is stored in the
+        trap's ``last_status`` as ``ls:name,name,...`` (bounded).
+        """
+        if self._collectible is None:
+            return None
+        keyword = (trap.username or "").strip().lower()
+        if not keyword:
+            return None
+        try:
+            listings = await self._collectible.fragment.browse("", limit=0)
+        except Exception as exc:  # pragma: no cover - network dependent
+            logger.warning("listing watch failed for %r: %s", keyword, exc)
+            return None
+
+        current = {
+            item.name: item.min_bid
+            for item in listings
+            if keyword in item.name.lower()
+        }
+        prev = trap.last_status or ""
+
+        if not prev.startswith("ls:"):
+            await self._record(trap.id, "ls:" + ",".join(sorted(current))[:500])
+            return None
+
+        seen = {n for n in prev[3:].split(",") if n}
+        fresh = sorted(name for name in current if name not in seen)
+        merged = sorted(seen | set(current))[-80:]
+        await self._record(trap.id, "ls:" + ",".join(merged)[:500])
+
+        if fresh:
+            await self._notify_listing(trap.telegram_id, fresh[0], current.get(fresh[0]))
+            return fresh[0]
+        return None
+
     async def _sweep_mask(self, trap) -> str | None:
         """Sniper: try a few fresh candidates from the mask, report the first free one."""
         if not mask_is_usable(trap.username):
@@ -309,6 +352,18 @@ class TrapWatcher:
             logger.info("collectible trap fired: %s notified about %s", telegram_id, username)
         except Exception as exc:
             logger.warning("could not notify %s about %s: %s", telegram_id, username, exc)
+
+    async def _notify_listing(self, telegram_id: int, name: str, price: str | None) -> None:
+        lang = await self._language_for(telegram_id)
+        try:
+            await self._bot.send_message(
+                chat_id=telegram_id,
+                text=texts.watch_listing_alert(lang, name, price),
+                reply_markup=None,
+            )
+            logger.info("listing watch fired: %s notified about %s", telegram_id, name)
+        except Exception as exc:
+            logger.warning("could not notify %s about %s: %s", telegram_id, name, exc)
 
     @staticmethod
     async def _language_for(telegram_id: int) -> str:

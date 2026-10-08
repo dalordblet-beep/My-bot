@@ -504,8 +504,33 @@ python scripts/login_mtproto.py --status   # show which account the session belo
 ```
 
 `scripts/login_mtproto.py` is now only for inspecting the session, or — if you
-specifically want a *user* session (e.g. to experiment with the user-only
-`account.checkUsername`) — doing an interactive phone login with `--force`.
+specifically want a *user* session (see below) — doing an interactive phone
+login with `--user`.
+
+### Making "free" mean "claimable" (optional user session)
+
+A **bot** cannot call `account.checkUsername` (Telegram answers
+`BotMethodInvalidError`), and `contacts.resolveUsername` alone is not enough:
+Telegram also answers `USERNAME_NOT_OCCUPIED` for names it will then *refuse to
+assign* (reserved, recently-released cooldown, anti-abuse). A bot session
+therefore reports some names as free that the app rejects with "incorrect
+username" at claim time.
+
+The only method that separates "unowned" from "unassignable" is the user-only
+`account.checkUsername`. To use it, log in a **user** account (a spare one is
+fine) into a **separate** session file:
+
+```bash
+python scripts/login_mtproto.py --user          # phone + code -> username_scanner_user.session
+python scripts/login_mtproto.py --user --status # confirm it is a user, not a bot
+```
+
+On startup the bot loads that session automatically and gates every "free"
+verdict through `checkUsername`: a name Telegram would not assign is skipped and
+the search keeps hunting. Without the file the engine stays best-effort, exactly
+as before. The user session is only used for this check — the bot's own
+`resolveUsername` traffic is unaffected, and the two sessions use different
+accounts.
 
 **If you would rather skip MTProto entirely**, set:
 
@@ -516,6 +541,36 @@ ALLOW_BOT_API_AVAILABILITY=true
 The bot is then fully functional using only the Bot API: occupied usernames are
 detected definitively, and "chat not found" is treated as AVAILABLE. It is
 lower confidence — that is exactly why it is opt-in.
+
+## 11b. Collector tools
+
+**Appraisal — `/appraise love`** (or the *Appraise a name* button). One answer:
+is it claimable right now, is it on Fragment and at what price, what comparable
+names of the same length are asking, a rarity score, and a trademark warning if
+the handle matches a known brand. Availability comes from Telegram, prices from
+Fragment — nothing is estimated, and it says "not financial advice".
+
+**Comparables.** `FragmentClient.market_stats(length)` aggregates the *live*
+Fragment listings by name length (low / median / high). It is asking price, not
+sold price, and the UI labels it that way.
+
+**Portfolio.** Add names you own; the bot keeps their latest Fragment value and
+shows it on one screen. *Refresh* re-reads every holding from Fragment.
+
+**Listing sniper.** On the Watch screen, *Watch listings* takes a keyword and
+pings you when a **new** matching collectible appears on Fragment (the first
+sweep only records a baseline, so you are never spammed with the existing set).
+Watching a single name on Fragment (price / listed) is also available.
+
+**Checker account pool.** One user account cannot carry every check without
+FloodWait. Set `MTPROTO_USER_SESSIONS` to a comma-separated list of session base
+names and the engine rotates across them, parking a rate-limited one and using
+the next. Create each with:
+
+```bash
+python scripts/login_user_steps.py --name username_scanner_user2 send +7999...
+python scripts/login_user_steps.py --name username_scanner_user2 sign 12345
+```
 
 ## 12. Running the bot
 

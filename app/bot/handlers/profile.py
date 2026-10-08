@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.types import CallbackQuery
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.features_kb import back_home_keyboard, profile_keyboard
 from app.database import repository as repo
@@ -22,7 +23,7 @@ router = Router(name="profile")
 
 @router.callback_query(F.data == cb.MENU_PROFILE)
 async def cb_profile(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     row = await user_service.get_settings_row(session, user)
     stats = {
@@ -53,21 +54,23 @@ async def cb_profile(
 
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(
-            texts.profile_screen(lang, user, stats), reply_markup=profile_keyboard(lang)
+        await show_screen(
+            callback, bot,
+            texts.profile_screen(lang, user, stats), keyboard=profile_keyboard(lang)
         )
 
 
 @router.callback_query(F.data == cb.PROFILE_ACH)
 async def cb_achievements(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     """Recomputed on demand - it is a handful of cheap count queries."""
     stats = await _achievement_stats(session, user)
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(
-            texts.profile_achievements(lang, stats), reply_markup=profile_keyboard(lang)
+        await show_screen(
+            callback, bot,
+            texts.profile_achievements(lang, stats), keyboard=profile_keyboard(lang)
         )
 
 

@@ -27,6 +27,20 @@ from app.search.pattern import is_pronounceable, is_real_word, rate
 
 VOWELS = set("aeiouy")
 
+# A short list of well-known brands. Buying a handle that matches one invites a
+# trademark complaint, which the market prices as a discount - worth a warning.
+BRANDS = {
+    "google", "apple", "nike", "adidas", "microsoft", "amazon", "meta",
+    "facebook", "instagram", "telegram", "whatsapp", "tiktok", "youtube",
+    "netflix", "spotify", "tesla", "openai", "samsung", "intel", "nvidia",
+    "paypal", "visa", "mastercard", "binance", "coinbase", "ethereum",
+    "bitcoin", "revolut", "uber", "airbnb", "coca", "pepsi", "disney",
+}
+
+
+def is_brand(name: str) -> bool:
+    return name.strip().lstrip("@").lower() in BRANDS
+
 
 def is_wordlike(name: str) -> bool:
     """Heuristic: looks like a real (pronounceable) word, not a random string."""

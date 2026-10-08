@@ -42,3 +42,6 @@ Thumbs.db
 # Logs
 *.log
 logs/
+
+# transient user-login state
+_user_login_state.json

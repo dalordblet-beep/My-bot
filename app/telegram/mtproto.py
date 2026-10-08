@@ -31,8 +31,10 @@ try:  # Telethon is a hard requirement, but import errors must not crash boot.
         FloodWaitError,
         UsernameInvalidError,
         UsernameNotOccupiedError,
+        UsernamePurchaseAvailableError,
     )
-    from telethon.errors.rpcerrorlist import UsernameOccupiedError
+    from telethon.errors.rpcerrorlist import BotMethodInvalidError, UsernameOccupiedError
+    from telethon.tl.functions.account import CheckUsernameRequest
     from telethon.tl.functions.contacts import ResolveUsernameRequest
     from telethon.tl.functions.fragment import GetCollectibleInfoRequest
     from telethon.tl.types import Channel, Chat, InputCollectibleUsername
@@ -98,6 +100,10 @@ class MtprotoClient:
         self._client: Any | None = None
         self._lock = asyncio.Lock()
         self._ready = False
+        # Optional pool of user sessions, used only for account.checkUsername.
+        # Each entry: {"name", "client", "ready", "cooldown_until"}.
+        self._user_clients: list[dict[str, Any]] = []
+        self._user_turn = 0
 
     @property
     def configured(self) -> bool:
@@ -106,6 +112,15 @@ class MtprotoClient:
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def user_ready(self) -> bool:
+        """True when at least one real user session is loaded."""
+        return any(entry["ready"] for entry in self._user_clients)
+
+    @property
+    def user_session_count(self) -> int:
+        return sum(1 for entry in self._user_clients if entry["ready"])
 
     async def start(self) -> bool:
         if not self.configured:
@@ -181,8 +196,111 @@ class MtprotoClient:
                 await self._client.disconnect()
             except Exception:
                 pass
+        for entry in self._user_clients:
+            try:
+                await entry["client"].disconnect()
+            except Exception:
+                pass
         self._client = None
         self._ready = False
+        self._user_clients = []
+        self._user_turn = 0
+
+    async def start_user(self) -> bool:
+        """Load the optional *user* session pool for account.checkUsername.
+
+        ``contacts.resolveUsername`` answers "not occupied" for a name that
+        Telegram will nevertheless refuse to assign (reserved, cooldown,
+        anti-abuse). A bot is forbidden from calling ``account.checkUsername``,
+        the one method that separates the two - so, when real user sessions are
+        available, they are used as the final assignability gate.
+
+        Several sessions may be configured (``MTPROTO_USER_SESSIONS``); they are
+        pooled and rotated so a single account's FloodWait cannot stall every
+        check. No session file means the feature is simply off.
+        """
+        if not self.configured or self._user_clients:
+            return self.user_ready
+
+        names = settings.user_session_names
+        found = 0
+        for name in names:
+            if not name or not Path(f"{name}.session").exists():
+                continue
+            try:
+                client = TelegramClient(name, settings.api_id, settings.api_hash)
+                await client.connect()
+                if not await client.is_user_authorized():
+                    await client.disconnect()
+                    continue
+                me = await client.get_me()
+                if getattr(me, "bot", False):
+                    logger.warning("user session %s is a bot - skipped", name)
+                    await client.disconnect()
+                    continue
+                self._user_clients.append(
+                    {"name": name, "client": client, "ready": True, "cooldown_until": 0.0}
+                )
+                found += 1
+            except Exception as exc:
+                logger.warning("could not start user session %s: %s", name, exc)
+
+        if found:
+            logger.info("user session pool ready (%d account(s)) - claimability on", found)
+        else:
+            logger.info(
+                "no user session found (%s) - claimability check stays off; create "
+                "one with: python scripts/login_mtproto.py --user",
+                ", ".join(names) or "-",
+            )
+        return self.user_ready
+
+    async def check_username(self, username: str) -> bool | None:
+        """Authoritative assignability test via the user-only checkUsername.
+
+        This is the exact call the Telegram app makes when you type a username,
+        so it is the only signal that separates "nobody owns it" from "nobody
+        owns it *and* Telegram will not give it to you". The verdicts:
+
+        * ``True``  - claimable right now;
+        * ``False`` - occupied, or unassignable (``UsernameInvalidError``:
+          reserved / cooldown / anti-abuse / Fragment stock, which the app shows
+          as "incorrect username"), or listed for sale (``UsernamePurchaseAvailableError``);
+        * ``None`` - no verdict available (no session, or every session was
+          rate-limited / errored), so the caller stays best-effort.
+
+        Sessions are tried in rotation; a rate-limited one is parked for a while
+        and the next is used, so one busy account does not stall the pool.
+        """
+        ready = [e for e in self._user_clients if e["ready"]]
+        if not ready:
+            return None
+
+        now = asyncio.get_event_loop().time()
+        order = ready[self._user_turn % len(ready):] + ready[: self._user_turn % len(ready)]
+        self._user_turn += 1
+
+        for entry in order:
+            if entry["cooldown_until"] > now:
+                continue
+            async with self._lock:
+                try:
+                    return bool(await entry["client"](CheckUsernameRequest(username)))
+                except (UsernameInvalidError, UsernamePurchaseAvailableError):
+                    return False
+                except BotMethodInvalidError:
+                    logger.warning("session %s is a bot - dropping it", entry["name"])
+                    entry["ready"] = False
+                    continue
+                except FloodWaitError as exc:  # pragma: no cover - network dependent
+                    wait = float(getattr(exc, "seconds", 60) or 60)
+                    entry["cooldown_until"] = now + wait
+                    logger.warning("session %s flood wait %ss - parked", entry["name"], int(wait))
+                    continue
+                except Exception as exc:
+                    logger.debug("checkUsername(%s) via %s failed: %s", username, entry["name"], exc)
+                    continue
+        return None
 
     async def resolve_username(self, username: str) -> MtprotoResult:
         if not self._ready or self._client is None:

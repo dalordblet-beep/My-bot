@@ -189,12 +189,16 @@ class Trap(Base):
         ForeignKey("users.id", ondelete="CASCADE"), index=True
     )
     telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
-    # "name" watches one exact username; "mask" is a sniper that generates
-    # candidates from a mask every sweep and reports the first free one.
-    kind: Mapped[str] = mapped_column(String(8), default="name")
+    # "name"  watches one exact username for release;
+    # "mask"  is a sniper that generates candidates from a mask each sweep;
+    # "collectible" watches one name on Fragment for a listing/price change;
+    # "listing" watches a keyword and reports NEW Fragment listings that match.
+    kind: Mapped[str] = mapped_column(String(16), default="name")
     username: Mapped[str] = mapped_column(String(64), index=True)
     active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
-    last_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # For "listing" this holds the seen-name set ("ls:a,b,c"); for the others a
+    # compact state token, so the column is sized for the longest case.
+    last_status: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     last_checked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
@@ -225,6 +229,34 @@ class Battle(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
+    )
+
+
+class PortfolioItem(Base):
+    """A collectible username the user says they own, tracked for its value.
+
+    The value is refreshed from Fragment on demand; the last reading is kept so
+    the portfolio screen is instant and can show a change since the last check.
+    """
+
+    __tablename__ = "portfolio"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", ondelete="CASCADE"), index=True
+    )
+    telegram_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    username: Mapped[str] = mapped_column(String(64), index=True)
+    note: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    last_price: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    last_checked_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("telegram_id", "username", name="uq_portfolio_user_name"),
     )
 
 

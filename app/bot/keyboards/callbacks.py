@@ -141,3 +141,13 @@ MENU_FAVORITES = "menu:fav"
 FAV_ADD_PREFIX = "fav:add"
 FAV_DEL_PREFIX = "fav:del"
 PROFILE_ACH = "menu:ach"
+
+# appraisal + collector portfolio + listing sniper
+MENU_APPRAISE = "menu:appraise"
+MENU_PORTFOLIO = "menu:portfolio"
+PORT_ADD = "port:add"
+PORT_DEL_PREFIX = "port:del"
+PORT_REFRESH = "port:refresh"
+PORT_ADD_NAME_PREFIX = "port:addname"
+WATCH_LISTING = "watch:listing"
+WATCH_ADD_NAME_PREFIX = "watch:addname"

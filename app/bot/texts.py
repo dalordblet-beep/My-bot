@@ -193,6 +193,16 @@ def main_menu(lang: str) -> str:
     return f"{t(lang, 'menu.title')}\n\n{t(lang, 'menu.question')}"
 
 
+def main_menu_caption(lang: str) -> str:
+    """Short caption for the photo+keyboard main menu message.
+
+    The brand image already carries the "Меню" graphic, so only the prompt
+    line is duplicated underneath - matches the single-message layout the
+    user expects.
+    """
+    return t(lang, "menu.question")
+
+
 def banned_screen(lang: str, reason: str | None) -> str:
     text = f"{t(lang, 'ban.title')}\n\n{t(lang, 'ban.body')}"
     if reason:
@@ -790,10 +800,10 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
 
     if attempt.value is not None:
         val = attempt.value
-        lines.append(
-            t(lang, "value.estimate", low=val["band_low"], high=val["band_high"])
-        )
-        if val["wordlike"]:
+        price = val.get("price")
+        if price:
+            lines.append(t(lang, "value.estimate", price=f"{price:,}"))
+        if val.get("wordlike"):
             lines.append(t(lang, "value.wordlike"))
 
     # The claim kit: a free name is only useful if the user can take it, and a
@@ -880,6 +890,80 @@ def trap_collectible(lang: str, username: str, price: str | None, status: str) -
         price=esc(price or t(lang, "collectible.s_unknown")),
         status=esc(collectible_label(lang, status)),
     )
+
+
+def watch_listing_alert(lang: str, username: str, price: str | None) -> str:
+    return t(lang, "watch.listing_alert", name=esc(username), price=esc(price or "?"))
+
+
+# --------------------------------------------------------------------- appraisal
+def appraise_availability(lang: str, result, verified: bool) -> str:
+    """Turn a check verdict into the one-line availability sentence.
+
+    ``verified`` is True when a user session confirmed claimability, so a "free"
+    answer can be stated with confidence rather than as best-effort.
+    """
+    status = getattr(result, "status", None)
+    if status is CheckStatus.AVAILABLE:
+        key = "appraise.a_free" if verified else "appraise.a_free_unverified"
+    elif status is CheckStatus.OCCUPIED:
+        key = "appraise.a_taken"
+    elif status is CheckStatus.INVALID:
+        key = "appraise.a_unassignable"
+    else:
+        key = "appraise.a_unknown"
+    return t(lang, key)
+
+
+def appraise_screen(
+    lang: str, name: str, availability: str,
+    fragment_line: str | None, market_line: str | None,
+    value: dict | None, brand: bool,
+) -> str:
+    lines = [
+        t(lang, "appraise.title"),
+        "",
+        f"<b>@{esc(name)}</b>",
+        "",
+        t(lang, "appraise.availability", value=availability),
+    ]
+    if fragment_line:
+        lines.append(fragment_line)
+    if market_line:
+        lines.append(market_line)
+    if value is not None:
+        lines.append(
+            t(
+                lang, "appraise.rarity", score=value["score"],
+                wordlike=(t(lang, "appraise.wordlike") if value.get("wordlike") else ""),
+            )
+        )
+    if brand:
+        lines += ["", t(lang, "appraise.brand")]
+    lines += ["", t(lang, "appraise.footer")]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------- portfolio
+def portfolio_screen(lang: str, items: list, estimates: dict | None = None) -> str:
+    """Holdings with their value: the real listing price when listed, else a
+    comparables estimate, else "not listed". One number per name, always."""
+    if not items:
+        return t(lang, "portfolio.empty")
+    estimates = estimates or {}
+    lines = [t(lang, "portfolio.title"), "", t(lang, "portfolio.body"), ""]
+    for item in items:
+        if item.last_price:
+            value = esc(item.last_price)
+        elif estimates.get(item.username):
+            value = t(lang, "portfolio.value_estimate", price=f"{estimates[item.username]:,}")
+        else:
+            value = esc(t(lang, "portfolio.value_unknown"))
+        lines.append(
+            t(lang, "portfolio.line", icon="\u2022", name=esc(item.username), value=value)
+        )
+    lines += ["", t(lang, "portfolio.total", n=len(items))]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------- profile

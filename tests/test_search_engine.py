@@ -75,6 +75,46 @@ def test_build_mask_respects_length_and_digits():
     assert build_mask(prefix="moged", length=8) == "moged???"
 
 
+def test_broad_candidates_reach_beyond_the_pronounceable_space():
+    """The guarantee needs a stream wider than "pretty" coinages.
+
+    At five characters the pronounceable space is exhausted (measured live), so
+    a free short name only exists among the full-alphabet combinations. The
+    broad stream must emit valid handles of exactly the requested length.
+    """
+    from app.search.generator import broad_candidates
+
+    names = list(
+        broad_candidates(length=5, allow_digits=False, min_score=45, rng=random.Random(0), limit=50)
+    )
+    assert names
+    for name in names:
+        assert len(name) == 5, name
+        assert name.isalpha(), name
+        assert any(ch in "aeiouy" for ch in name), name  # kept merely sayable
+
+
+def test_digits_are_placed_inside_the_length_not_appended():
+    """The length setting is the TOTAL length; digits sit inside it.
+
+    ``length=5, digits on`` must yield five-character names carrying 1-2 digits -
+    not a five-letter stem with digits glued on (which produced 6-7 char names).
+    """
+    from app.search.generator import beautiful_candidates
+
+    names = [
+        n for n in beautiful_candidates(
+            length=5, allow_digits=True, min_score=45, rng=random.Random(1), limit=200
+        )
+    ][:20]
+    assert names
+    for name in names:
+        assert len(name) == 5, name
+        digits = sum(ch.isdigit() for ch in name)
+        assert 1 <= digits <= 2, name
+        assert not name[0].isdigit(), name  # never a leading digit
+
+
 # --------------------------------------------------------------------------- rating
 def test_rating_rewards_short_clean_names():
     # A real word is worth more than a pronounceable coinage of the same shape,
@@ -210,13 +250,61 @@ async def test_finder_exhausts_its_budget_before_giving_up(bot, monkeypatch):
     checker.confirm_availability = occupied
     finder = UsernameFinder(checker, None)
 
-    attempt = await finder.find_one(SearchCriteria(length=6))
+    # Length 8 uses the base budget (short names earn an enlarged one, because
+    # the short space is the most squatted - that is the point of the split).
+    attempt = await finder.find_one(SearchCriteria(length=8))
 
     # A single lookup is not a search, and the scarce MTProto budget is honoured.
     assert attempt.username == ""
     assert attempt.hit is False
     assert attempt.reason == "all_taken"
     assert confirms == 3
+
+
+async def test_short_names_get_an_enlarged_budget(bot, monkeypatch):
+    """5-6 letter handles are the most squatted space on Telegram; a base
+    budget would end those searches in "all taken" far too often."""
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    probe = FakePageProbe(state="unknown")
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=probe)
+
+    confirms = 0
+
+    async def occupied(name):
+        nonlocal confirms
+        confirms += 1
+        return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+
+    checker.confirm_availability = occupied
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=5))
+
+    assert attempt.reason == "all_taken"
+    assert confirms == finder_module.SHORT_NAME_CONFIRM_BUDGET
+
+
+async def test_digits_on_names_always_carry_digits(bot, monkeypatch):
+    """Digits enabled is a promise, not a permission: every candidate the
+    search may return must actually carry 1-2 digits."""
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
+    finder = UsernameFinder(checker, None)
+
+    attempt = await finder.find_one(SearchCriteria(length=5, allow_digits=True))
+
+    assert attempt.hit is True
+    assert attempt.username
+    digits = sum(ch.isdigit() for ch in attempt.username)
+    assert 1 <= digits <= 2
+    # The length setting is the TOTAL length: digits sit inside it, not on top.
+    assert len(attempt.username) == 5
 
 
 async def test_finder_walks_past_occupied_names_to_find_a_free_one(bot, monkeypatch):

@@ -201,3 +201,131 @@ async def test_mtproto_invalid_is_never_a_free_verdict(monkeypatch):
     # A malformed one stays invalid - it could not be registered anyway.
     malformed = await client.resolve_username("ab")
     assert malformed.kind == "invalid"
+
+
+# ------------------------------------- not_occupied is not the same as claimable
+async def test_unassignable_name_is_not_reported_free(monkeypatch):
+    """The ``bapug`` case: resolve says not_occupied, but it cannot be claimed.
+
+    Telegram answers USERNAME_NOT_OCCUPIED for names it will still refuse to
+    assign (reserved / cooldown / anti-abuse) - the app then says "incorrect
+    username". Only the user-only account.checkUsername separates the two, so
+    when a user session is available an unassignable name must not be AVAILABLE.
+    """
+    from app.telegram import mtproto as mtproto_module
+    from app.telegram.mtproto import MtprotoResult
+    from app.telegram.username_checker import UsernameChecker
+    from app.utils.enums import CheckStatus
+
+    client = mtproto_module.mtproto_client
+
+    async def fake_resolve(name):
+        return MtprotoResult("not_occupied")
+
+    async def fake_check(name):
+        return False  # Telegram would not assign it
+
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(
+        client, "_user_clients",
+        [{"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}],
+        raising=False,
+    )
+    monkeypatch.setattr(client, "resolve_username", fake_resolve, raising=False)
+    monkeypatch.setattr(client, "check_username", fake_check, raising=False)
+
+    checker = UsernameChecker(cache=None, bot=None)
+    result = await checker.confirm_availability("bapug")
+
+    assert result.status is CheckStatus.INVALID
+    assert result.reason == "not_assignable"
+
+
+async def test_assignable_name_stays_available(monkeypatch):
+    """When checkUsername confirms it, a not_occupied name is genuinely free."""
+    from app.telegram import mtproto as mtproto_module
+    from app.telegram.mtproto import MtprotoResult
+    from app.telegram.username_checker import UsernameChecker
+    from app.utils.enums import CheckStatus
+
+    client = mtproto_module.mtproto_client
+
+    async def fake_resolve(name):
+        return MtprotoResult("not_occupied")
+
+    async def fake_check(name):
+        return True
+
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(
+        client, "_user_clients",
+        [{"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}],
+        raising=False,
+    )
+    monkeypatch.setattr(client, "resolve_username", fake_resolve, raising=False)
+    monkeypatch.setattr(client, "check_username", fake_check, raising=False)
+
+    checker = UsernameChecker(cache=None, bot=None)
+    result = await checker.confirm_availability("iduc9")
+
+    assert result.status is CheckStatus.AVAILABLE
+
+
+async def test_check_username_maps_unassignable_errors_to_false(monkeypatch):
+    """account.checkUsername speaks in exceptions; map them to a verdict.
+
+    Live behaviour (verified against a real user session):
+      * True  -> claimable;
+      * False -> occupied;
+      * UsernameInvalidError          -> unacceptable/reserved/cooldown -> not claimable;
+      * UsernamePurchaseAvailableError -> stock held for sale on Fragment -> not claimable.
+    """
+    from telethon.errors import UsernameInvalidError, UsernamePurchaseAvailableError
+
+    from app.telegram import mtproto as mtproto_module
+
+    client = mtproto_module.mtproto_client
+
+    class Raising:
+        def __init__(self, exc):
+            self._exc = exc
+
+        async def __call__(self, request):
+            raise self._exc
+
+    class Returning:
+        def __init__(self, value):
+            self._value = value
+
+        async def __call__(self, request):
+            return self._value
+
+    def pool(fake):
+        return [{"name": "t", "client": fake, "ready": True, "cooldown_until": 0.0}]
+
+    monkeypatch.setattr(
+        client, "_user_clients", pool(Raising(UsernameInvalidError(request=None))), raising=False
+    )
+    assert await client.check_username("bapug") is False
+
+    monkeypatch.setattr(
+        client, "_user_clients",
+        pool(Raising(UsernamePurchaseAvailableError(request=None))), raising=False,
+    )
+    assert await client.check_username("emanim") is False
+
+    monkeypatch.setattr(client, "_user_clients", pool(Returning(True)), raising=False)
+    assert await client.check_username("iduc9") is True
+
+    monkeypatch.setattr(client, "_user_clients", pool(Returning(False)), raising=False)
+    assert await client.check_username("abcde") is False
+
+
+async def test_check_username_is_none_without_a_user_session():
+    """No user session -> no verdict, so the caller stays best-effort."""
+    from app.telegram import mtproto as mtproto_module
+
+    client = mtproto_module.mtproto_client
+    client._user_clients = []
+    client._user_turn = 0
+    assert await client.check_username("iduc9") is None

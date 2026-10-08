@@ -8,6 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.history_kb import (
     LENGTH_OPTIONS,
@@ -50,7 +51,7 @@ async def _show(callback: CallbackQuery, bot: Bot, text: str, keyboard) -> None:
     message = callback.message
     if message is not None:
         try:
-            await message.edit_text(text, reply_markup=keyboard)
+            await show_screen(callback, bot, text, keyboard)
             return
         except Exception:
             pass
@@ -77,9 +78,10 @@ async def cb_set_length(
     if raw == "menu":
         await callback.answer()
         if callback.message is not None:
-            await callback.message.edit_text(
+            await show_screen(
+                callback, bot,
                 t(lang, "settings.pick_length"),
-                reply_markup=value_picker_keyboard(
+                keyboard=value_picker_keyboard(
                     lang, cb.SETTINGS_LENGTH_PREFIX, LENGTH_OPTIONS, row.search_length or 8
                 ),
             )

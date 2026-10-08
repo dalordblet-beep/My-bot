@@ -12,7 +12,6 @@ from app.bot import texts
 from app.bot.gate import render_gate, send_main_menu
 from app.bot.handlers.language import show_language_picker
 from app.bot.keyboards import callbacks as cb
-from app.bot.keyboards.main_menu import main_menu_keyboard
 from app.database.models import User
 from app.services.access import access_guard
 from app.services.captcha import CaptchaService
@@ -59,8 +58,15 @@ async def cmd_start(
         )
         return
 
-    await message.answer(
-        texts.welcome(lang, user), reply_markup=main_menu_keyboard(lang, access.is_admin)
+    # /start IS the main menu entry: one Telegram message with the brand
+    # photo on top, the personalised welcome greeting as the caption, and
+    # the main-menu keyboard attached to the same message.
+    await send_main_menu(
+        bot,
+        message.chat.id,
+        lang,
+        text=texts.welcome(lang, user),
+        is_admin=access.is_admin,
     )
 
 

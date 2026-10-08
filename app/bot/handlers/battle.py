@@ -25,6 +25,7 @@ from aiogram.types import (
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.features_kb import back_home_keyboard, battle_accept_keyboard, battle_keyboard
 from app.bot.states.states import BattleStates
@@ -69,10 +70,12 @@ def _battle_text(lang: str, result, timed_out: bool) -> str:
 
 # --------------------------------------------------------------------- entry
 @router.callback_query(F.data == cb.MENU_BATTLE)
-async def cb_battle(callback: CallbackQuery, lang: str = "en") -> None:
+async def cb_battle(callback: CallbackQuery, bot: Bot, lang: str = "en") -> None:
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(texts.battle_screen(lang), reply_markup=battle_keyboard(lang))
+        await show_screen(
+            callback, bot, texts.battle_screen(lang), keyboard=battle_keyboard(lang)
+        )
 
 
 # --------------------------------------------------------------------- manual

@@ -123,9 +123,22 @@ class MockTelegramSession(BaseSession):
         if name == "SendMessage":
             self.messages.append(payload)
             return self._message(bot, payload.get("chat_id"), payload.get("text") or "")
+        if name == "SendPhoto":
+            # Single message carrying the brand photo + the menu caption +
+            # the inline keyboard. Mirror SendMessage so tests can read back
+            # the caption as ``text`` and the keyboard as ``reply_markup``.
+            payload["text"] = payload.get("caption") or ""
+            self.messages.append(payload)
+            return self._message(bot, payload.get("chat_id"), payload["text"])
         if name == "EditMessageText":
             self.edits.append(payload)
             return self._message(bot, payload.get("chat_id"), payload.get("text") or "")
+        if name == "EditMessageMedia":
+            # Converting a previous text bubble into the photo+caption menu
+            # in place. The caption is what users (and tests) read as text.
+            payload["text"] = (payload.get("media") or {}).get("caption") or ""
+            self.edits.append(payload)
+            return self._message(bot, payload.get("chat_id"), payload["text"])
         if name == "AnswerCallbackQuery":
             self.answers.append(payload)
             return True

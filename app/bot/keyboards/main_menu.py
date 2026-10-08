@@ -19,6 +19,16 @@ def main_menu_keyboard(lang: str, is_admin: bool = False) -> InlineKeyboardMarku
         ],
         [
             btn(
+                t(lang, "btn.appraise"), icon="gem", style=PRIMARY,
+                callback_data=cb.MENU_APPRAISE,
+            ),
+            btn(
+                t(lang, "btn.portfolio"), icon="money", style=SUCCESS,
+                callback_data=cb.MENU_PORTFOLIO,
+            ),
+        ],
+        [
+            btn(
                 t(lang, "btn.watch"), icon="eye", style=SUCCESS,
                 callback_data=cb.MENU_WATCH,
             )

@@ -40,6 +40,26 @@ class Settings(BaseSettings):
     api_id: int = 0
     api_hash: str = ""
     mtproto_session: str = "username_scanner_session"
+    # Optional SECOND session: a real *user* account (phone login) used only for
+    # the user-only ``account.checkUsername``. That method is the single source
+    # that can tell a genuinely claimable name from one Telegram answers
+    # ``not_occupied`` for but then refuses to assign (reserved / cooldown /
+    # anti-abuse) - the false "free" that a bot session cannot avoid. Leave the
+    # file absent to disable; create it with ``scripts/login_mtproto.py --user``.
+    mtproto_user_session: str = "username_scanner_user"
+    # Optional POOL of extra user sessions (comma separated base names). One
+    # account cannot carry every user's checks without hitting FloodWait, so a
+    # pool lets the engine rotate: a session that is rate-limited is parked and
+    # the next one is used. Empty means "just the single session above".
+    # Create each with: python scripts/login_mtproto.py --user --name <base>
+    mtproto_user_sessions: str = ""
+    # Optional image sent next to the main menu (welcome / home). Set to an
+    # absolute path of a local .jpg/.png. Left empty or pointing at a missing
+    # file to send no image. Overridable via the MENU_IMAGE_PATH env var.
+    menu_image_path: str = (
+        "C:\\Users\\GaboEB\\.workbuddy-ai\\clipboard-images\\"
+        "clipboard-2026-10-07T23-27-55-228Z-a5ea59d1.jpg"
+    )
 
     database_url: str = (
         "postgresql+asyncpg://scanner:scanner@localhost:5432/username_scanner"
@@ -142,6 +162,14 @@ class Settings(BaseSettings):
     @property
     def mtproto_configured(self) -> bool:
         return bool(self.api_id and self.api_hash)
+
+    @property
+    def user_session_names(self) -> List[str]:
+        """Every user-session base name to try, single session first."""
+        names = _split_csv(self.mtproto_user_sessions)
+        if self.mtproto_user_session and self.mtproto_user_session not in names:
+            names.insert(0, self.mtproto_user_session)
+        return names
 
     @property
     def channel_configured(self) -> bool:

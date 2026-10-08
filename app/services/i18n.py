@@ -156,7 +156,7 @@ EN: dict[str, str] = {
     ),
     "collectible.need_login_short": "{hourglass} Temporarily unavailable",
     "collectible.min_bid": "min bid {value} TON",
-    "value.estimate": "Est. market value: ~{low}-{high} TON",
+    "value.estimate": "{chart} Estimated price: <b>≈ {price} TON</b>",
     "value.wordlike": "looks like a real word - premium over random",
 
     # ---------------------------------------------------------------- scan
@@ -396,6 +396,9 @@ EN: dict[str, str] = {
     "search.filter_clear": "Clear filters",
     "search.filter_cleared": "Filters cleared",
     "search.running": "{search} <b>SEARCHING...</b>",
+    "search.progress_phase_valuable": "{compass} <i>Hunting the beautiful names…</i>",
+    "search.progress_phase_guarantee": "{gem} <i>Digging for a free one…</i>",
+    "search.progress_checked": "{bolt} Checked: <b>{n}</b> · {s}s",
     "search.queued": (
         "{search} <b>QUEUED</b> - position {n}\n\n"
         "The search is running at a safe Telegram rate. I will send the result "
@@ -433,8 +436,10 @@ EN: dict[str, str] = {
         "valuable."
     ),
     "search.all_taken_hint": (
-        "{info} <i>Add a username to Watch from the main menu and get an alert when "
-        "a later check confirms it free. Or run again: the next press tries a different set.</i>"
+        "{info} <i>For 5-6 character names, turn <b>Digits</b> on: letter-only short "
+        "names are almost all gone, while a short name with 1-2 digits is usually "
+        "still free. You can also add a name to Watch and get an alert when a later "
+        "check confirms it free, or press again for a different set.</i>"
     ),
     "search.unconfirmed": (
         "{warn} Checked {n} names, but Telegram could not confirm any of them as "
@@ -761,6 +766,54 @@ EN: dict[str, str] = {
     "btn.favorites": "Favourites",
     "btn.save": "Save",
     "btn.rate": "Rate",
+    "btn.appraise": "Appraise a name",
+    "btn.portfolio": "Portfolio",
+    "btn.refresh": "Refresh",
+    "btn.add_portfolio": "To portfolio",
+
+    # ---------------------------------------------------------------- appraisal
+    "appraise.title": "{gem} <b>APPRAISAL</b>",
+    "appraise.usage": "Appraise a name: <code>/appraise love</code>",
+    "appraise.invalid": "{warn} That is not a valid username.",
+    "appraise.running": "{search} <b>APPRAISING…</b>",
+    "appraise.availability": "Availability: {value}",
+    "appraise.a_free": "{check} free — claimable right now",
+    "appraise.a_free_unverified": "{check} free (unverified — confirm in the app)",
+    "appraise.a_taken": "{cross} taken",
+    "appraise.a_unassignable": "{warn} cannot be claimed (reserved or in cooldown)",
+    "appraise.a_unknown": "{warn} unknown",
+    "appraise.fragment_none": "Fragment: not listed",
+    "appraise.fragment_sale": "Fragment: {status} — {price}",
+    "appraise.fragment_unknown": "Fragment: unknown",
+    "appraise.market": "{chart} Estimated price: <b>≈ {price} TON</b> (from {n} similar {length}-char listings)",
+    "appraise.market_none": "{chart} Market: no comparable listings right now",
+    "appraise.rarity": "{sparkle} Rarity: <b>{score}</b>/100{wordlike}",
+    "appraise.wordlike": " — reads like a real word",
+    "appraise.brand": "{warn} Looks like a brand name — check the trademark before buying.",
+    "appraise.footer": "<i>Availability from Telegram, prices from Fragment. Not financial advice.</i>",
+
+    # ---------------------------------------------------------------- portfolio
+    "portfolio.title": "{money} <b>PORTFOLIO</b>",
+    "portfolio.body": "Your collectible holdings and their latest Fragment value. Tap a name to open it; the cross removes it.",
+    "portfolio.empty": "{money} <b>PORTFOLIO</b>\n\nNothing tracked yet. Add a name you own and the bot will follow its value.",
+    "portfolio.line": "{icon} <b>@{name}</b> — {value}",
+    "portfolio.value_estimate": "≈ {price} TON (est.)",
+    "portfolio.value_unknown": "not listed",
+    "portfolio.total": "Tracked: {n} name(s)",
+    "portfolio.add": "Add",
+    "portfolio.add_prompt": "{star} <b>ADD TO PORTFOLIO</b>\n\nSend the username you own.",
+    "portfolio.added": "{check} @{name} added to your portfolio",
+    "portfolio.exists": "{info} @{name} is already in your portfolio",
+    "portfolio.removed": "Removed from portfolio",
+    "portfolio.full": "Portfolio is full ({max})",
+    "portfolio.refresh_done": "{check} Values refreshed",
+
+    # ---------------------------------------------------------------- listing watch
+    "watch.watch_listing": "Watch listings",
+    "watch.listing_prompt": "{money} <b>WATCH LISTINGS</b>\n\nSend a keyword — the bot pings you when a matching collectible appears for sale on Fragment.",
+    "watch.listing_added": "{check} Watching Fragment listings for “{q}”",
+    "watch.listing_note": "{info} <i>Checked every few minutes. Only new matches are reported.</i>",
+    "watch.listing_alert": "{money} <b>NEW LISTING</b>\n\n@{name} — {price}\n\nfragment.com/username/{name}",
 
     "bulk.title": "{clipboard} <b>CHECK A LIST</b>",
     "bulk.body": (
@@ -945,7 +998,7 @@ RU: dict[str, str] = {
     ),
     "collectible.need_login_short": "{hourglass} Временно недоступно",
     "collectible.min_bid": "мин. ставка {value} TON",
-    "value.estimate": "Оценка рыночной стоимости: ~{low}-{high} TON",
+    "value.estimate": "{chart} Примерная цена: <b>≈ {price} TON</b>",
     "value.wordlike": "похоже на настоящее слово — дороже случайного набора",
 
     # ---------------------------------------------------------------- scan
@@ -1185,6 +1238,9 @@ RU: dict[str, str] = {
     "search.filter_clear": "Сбросить фильтры",
     "search.filter_cleared": "Фильтры сброшены",
     "search.running": "{search} <b>ИДЁТ ПОИСК...</b>",
+    "search.progress_phase_valuable": "{compass} <i>Перебираю красивые имена…</i>",
+    "search.progress_phase_guarantee": "{gem} <i>Копаю до свободного…</i>",
+    "search.progress_checked": "{bolt} Проверено: <b>{n}</b> · {s}с",
     "search.queued": (
         "{search} <b>В ОЧЕРЕДИ</b> — позиция {n}\n\n"
         "Поиск идёт на безопасной для Telegram скорости. Результат пришлю сюда "
@@ -1221,9 +1277,11 @@ RU: dict[str, str] = {
         "Короткие дорогие имена почти все разобраны — именно поэтому они и дорогие."
     ),
     "search.all_taken_hint": (
-        "{info} <i>Добавьте имя в «Слежение за никами» в главном меню — бот пришлёт "
-        "уведомление, когда очередная проверка подтвердит, что оно свободно. Или "
-        "нажмите ещё раз — будет проверен другой набор.</i>"
+        "{info} <i>Для имён из 5–6 символов включите <b>«Цифры»</b>: короткие имена "
+        "без цифр почти все разобраны, а короткое имя с 1–2 цифрами обычно ещё "
+        "свободно. Ещё можно добавить имя в «Слежение за никами» — бот уведомит, "
+        "когда проверка подтвердит, что оно свободно, — или нажать ещё раз: будет "
+        "проверен другой набор.</i>"
     ),
     "search.unconfirmed": (
         "{warn} Проверено имён: {n}, но ни одно из них Telegram не подтвердил как "
@@ -1552,6 +1610,54 @@ RU: dict[str, str] = {
     "btn.favorites": "Избранное",
     "btn.save": "Сохранить",
     "btn.rate": "Оценить",
+    "btn.appraise": "Оценить имя",
+    "btn.portfolio": "Портфель",
+    "btn.refresh": "Обновить",
+    "btn.add_portfolio": "В портфель",
+
+    # ---------------------------------------------------------------- appraisal
+    "appraise.title": "{gem} <b>ОЦЕНКА</b>",
+    "appraise.usage": "Оценка имени: <code>/appraise love</code>",
+    "appraise.invalid": "{warn} Это не похоже на username.",
+    "appraise.running": "{search} <b>ОЦЕНИВАЮ…</b>",
+    "appraise.availability": "Доступность: {value}",
+    "appraise.a_free": "{check} свободно — можно занять прямо сейчас",
+    "appraise.a_free_unverified": "{check} свободно (без проверки — подтвердите в приложении)",
+    "appraise.a_taken": "{cross} занято",
+    "appraise.a_unassignable": "{warn} занять нельзя (резерв или cooldown)",
+    "appraise.a_unknown": "{warn} неизвестно",
+    "appraise.fragment_none": "Fragment: не выставлено",
+    "appraise.fragment_sale": "Fragment: {status} — {price}",
+    "appraise.fragment_unknown": "Fragment: неизвестно",
+    "appraise.market": "{chart} Примерная цена: <b>≈ {price} TON</b> (по {n} похожим лотам на {length} симв.)",
+    "appraise.market_none": "{chart} Рынок: сравнимых лотов сейчас нет",
+    "appraise.rarity": "{sparkle} Редкость: <b>{score}</b>/100{wordlike}",
+    "appraise.wordlike": " — читается как настоящее слово",
+    "appraise.brand": "{warn} Похоже на бренд — проверьте права на торговую марку перед покупкой.",
+    "appraise.footer": "<i>Доступность — из Telegram, цены — с Fragment. Это не инвестиционный совет.</i>",
+
+    # ---------------------------------------------------------------- portfolio
+    "portfolio.title": "{money} <b>ПОРТФЕЛЬ</b>",
+    "portfolio.body": "Ваши коллекционные имена и их последняя цена на Fragment. Нажмите на имя, чтобы открыть; крестик — убрать.",
+    "portfolio.empty": "{money} <b>ПОРТФЕЛЬ</b>\n\nПока пусто. Добавьте имя, которым владеете, — бот будет следить за его ценой.",
+    "portfolio.line": "{icon} <b>@{name}</b> — {value}",
+    "portfolio.value_estimate": "≈ {price} TON (оценка)",
+    "portfolio.value_unknown": "не выставлено",
+    "portfolio.total": "В портфеле: {n}",
+    "portfolio.add": "Добавить",
+    "portfolio.add_prompt": "{star} <b>ДОБАВИТЬ В ПОРТФЕЛЬ</b>\n\nОтправьте имя, которым владеете.",
+    "portfolio.added": "{check} @{name} добавлен в портфель",
+    "portfolio.exists": "{info} @{name} уже в портфеле",
+    "portfolio.removed": "Убрано из портфеля",
+    "portfolio.full": "Портфель заполнен ({max})",
+    "portfolio.refresh_done": "{check} Цены обновлены",
+
+    # ---------------------------------------------------------------- listing watch
+    "watch.watch_listing": "Следить за лотами",
+    "watch.listing_prompt": "{money} <b>СЛЕЖЕНИЕ ЗА ЛОТАМИ</b>\n\nОтправьте слово — бот напишет, когда на Fragment появится подходящий коллекционный лот.",
+    "watch.listing_added": "{check} Слежу за лотами Fragment по «{q}»",
+    "watch.listing_note": "{info} <i>Проверяю раз в несколько минут. Сообщаю только о новых совпадениях.</i>",
+    "watch.listing_alert": "{money} <b>НОВЫЙ ЛОТ</b>\n\n@{name} — {price}\n\nfragment.com/username/{name}",
 
     "bulk.title": "{clipboard} <b>ПРОВЕРКА СПИСКА</b>",
     "bulk.body": (

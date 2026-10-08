@@ -16,6 +16,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.features_kb import (
     back_home_keyboard,
@@ -139,9 +140,10 @@ async def cb_length(
     if raw == "menu":
         await callback.answer()
         if callback.message is not None:
-            await callback.message.edit_text(
+            await show_screen(
+                callback, bot,
                 f"{t(lang, 'search.length_title')}\n\n{t(lang, 'search.length_body')}",
-                reply_markup=length_keyboard(lang, criteria.length),
+                keyboard=length_keyboard(lang, criteria.length),
             )
         return
 
@@ -178,14 +180,15 @@ async def cb_digits(
 @router.callback_query(F.data == cb.FIND_FILTER)
 async def cb_filter(
     callback: CallbackQuery, session: AsyncSession, user: User, state: FSMContext,
-    lang: str = "en",
+    bot: Bot, lang: str = "en",
 ) -> None:
     criteria = await _criteria(session, user, state)
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(
+        await show_screen(
+            callback, bot,
             f"{t(lang, 'search.filter_title')}\n\n{t(lang, 'search.filter_body')}",
-            reply_markup=filter_keyboard(lang, criteria.mask),
+            keyboard=filter_keyboard(lang, criteria.mask),
         )
 
 
@@ -322,15 +325,16 @@ async def cb_run(
 # -------------------------------------------------------------- username watches
 @router.callback_query(F.data == cb.MENU_WATCH)
 async def cb_watch_open(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     """The dedicated Watch screen replaces the old search-wizard trap entry."""
     watches = await _name_watches(session, user)
     await callback.answer()
     if callback.message is not None:
-        await callback.message.edit_text(
+        await show_screen(
+            callback, bot,
             texts.watch_screen(lang, watches, interval=runtime.trap_interval),
-            reply_markup=watch_keyboard(lang, watches),
+            keyboard=watch_keyboard(lang, watches),
         )
 
 
@@ -384,9 +388,10 @@ async def cb_watch_check(
 
     watches = await _name_watches(session, user)
     if callback.message is not None:
-        await callback.message.edit_text(
+        await show_screen(
+            callback, bot,
             texts.watch_screen(lang, watches, interval=runtime.trap_interval),
-            reply_markup=watch_keyboard(lang, watches),
+            keyboard=watch_keyboard(lang, watches),
         )
 
 
@@ -438,7 +443,7 @@ async def on_watch_add(
 
 @router.callback_query(F.data.startswith(f"{cb.WATCH_DEL_PREFIX}:"))
 async def cb_watch_delete(
-    callback: CallbackQuery, session: AsyncSession, user: User, lang: str = "en"
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     try:
         watch_id = int((callback.data or "").split(":")[-1])
@@ -450,7 +455,8 @@ async def cb_watch_delete(
     watches = await _name_watches(session, user)
     await callback.answer(t(lang, "watch.removed"))
     if callback.message is not None:
-        await callback.message.edit_text(
+        await show_screen(
+            callback, bot,
             texts.watch_screen(lang, watches, interval=runtime.trap_interval),
-            reply_markup=watch_keyboard(lang, watches),
+            keyboard=watch_keyboard(lang, watches),
         )

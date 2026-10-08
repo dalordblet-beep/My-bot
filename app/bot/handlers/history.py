@@ -10,6 +10,7 @@ from aiogram.types import CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot import texts
+from app.bot.gate import show_screen
 from app.bot.keyboards import callbacks as cb
 from app.bot.keyboards.history_kb import history_keyboard
 from app.database import repository as repo
@@ -37,7 +38,7 @@ async def _show(callback: CallbackQuery, bot: Bot, text: str, keyboard) -> None:
     message = callback.message
     if message is not None:
         try:
-            await message.edit_text(text, reply_markup=keyboard)
+            await show_screen(callback, bot, text, keyboard)
             return
         except Exception:
             pass

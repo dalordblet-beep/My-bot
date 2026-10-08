@@ -32,6 +32,9 @@ class FinderStates(StatesGroup):
     waiting_score = State()
     waiting_watch = State()
     waiting_bulk = State()
+    waiting_appraise = State()
+    waiting_portfolio = State()
+    waiting_listing = State()
 
 
 class BattleStates(StatesGroup):

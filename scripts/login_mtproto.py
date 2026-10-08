@@ -52,18 +52,38 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--status", action="store_true",
         help="print the account the current session belongs to and exit",
     )
+    parser.add_argument(
+        "--user", action="store_true",
+        help=(
+            "operate on the separate USER session (default name "
+            "username_scanner_user) instead of the bot session - this is the one "
+            "that unlocks account.checkUsername and makes 'free' mean 'claimable'"
+        ),
+    )
+    parser.add_argument(
+        "--name", default="",
+        help="explicit session base name (for a pool of checker accounts)",
+    )
     return parser.parse_args(argv)
 
 
-def session_paths() -> list[Path]:
+def session_base(args: argparse.Namespace) -> str:
+    """Which session file this run targets."""
+    if getattr(args, "name", ""):
+        return args.name
+    if getattr(args, "user", False):
+        return settings.mtproto_user_session
+    return settings.mtproto_session
+
+
+def session_paths(base: str) -> list[Path]:
     """Telethon writes ``<name>.session`` plus a transient ``-journal`` file."""
-    base = settings.mtproto_session
     return [Path(f"{base}.session"), Path(f"{base}.session-journal")]
 
 
-def remove_session() -> list[str]:
+def remove_session(base: str) -> list[str]:
     removed: list[str] = []
-    for path in session_paths():
+    for path in session_paths(base):
         try:
             if path.exists():
                 path.unlink()
@@ -96,23 +116,23 @@ async def main(argv: list[str] | None = None) -> int:
         print("Telethon is not installed. Run: pip install -r requirements.txt")
         return 3
 
+    base = session_base(args)
+
     if args.status:
-        client = TelegramClient(
-            settings.mtproto_session, settings.api_id, settings.api_hash
-        )
+        client = TelegramClient(base, settings.api_id, settings.api_hash)
         await client.connect()
         try:
             if not await client.is_user_authorized():
-                print("No authorised session found.")
+                print(f"No authorised session found ({base}.session).")
                 return 1
             me = await client.get_me()
-            print(f"Session: {settings.mtproto_session}.session")
+            print(f"Session: {base}.session")
             print(f"Authorised as {describe(me)}")
             if getattr(me, "bot", False):
                 print(
                     "This is a BOT session: availability checks work through\n"
                     "contacts.resolveUsername, but account.checkUsername is\n"
-                    "user-only and unavailable. Re-login with --force and a\n"
+                    "user-only and unavailable. Re-login with --user and a\n"
                     "PHONE NUMBER for a full user session."
                 )
         finally:
@@ -120,39 +140,43 @@ async def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.force:
-        removed = remove_session()
+        removed = remove_session(base)
         if removed:
             print(f"Removed old session: {', '.join(removed)}")
             print("Telegram will ask for the phone number and code again.\n")
         else:
             print("No existing session to remove - starting a fresh login.\n")
     else:
-        existing = [path.name for path in session_paths() if path.exists()]
+        existing = [path.name for path in session_paths(base) if path.exists()]
         if existing:
             print(
                 "A session already exists, so Telegram will NOT ask again:\n"
                 f"  {', '.join(existing)}\n\n"
                 "To log in as a different account, run:\n"
-                "  python scripts/login_mtproto.py --force\n"
+                f"  python scripts/login_mtproto.py{args.user and ' --user' or ''} --force\n"
                 "To see which account it belongs to:\n"
-                "  python scripts/login_mtproto.py --status\n"
+                f"  python scripts/login_mtproto.py{args.user and ' --user' or ''} --status\n"
             )
 
-    client = TelegramClient(
-        settings.mtproto_session, settings.api_id, settings.api_hash
-    )
+    client = TelegramClient(base, settings.api_id, settings.api_hash)
 
-    print(f"Session file: {settings.mtproto_session}.session")
-    print(
-        "This path creates a USER session (phone + code). The running bot already\n"
-        "logs in as the bot via BOT_TOKEN, so only do this if you specifically\n"
-        "want a user session for account.checkUsername.\n"
-        "When asked for a phone number, enter it WITH the country code "
-        "(e.g. +79991234567).\n"
-        "Do NOT paste a bot token here: the bot already holds that session, and\n"
-        "Telegram blocks the dedicated account.checkUsername method for bots.\n"
-        "The login code arrives inside the Telegram app, not by SMS.\n"
-    )
+    print(f"Session file: {base}.session")
+    if args.user:
+        print(
+            "Creating the USER session for account.checkUsername (phone + code).\n"
+            "Enter the phone number WITH the country code (e.g. +79991234567).\n"
+            "The login code arrives inside the Telegram app, not by SMS.\n"
+            "A spare account is fine - it is only used to ask Telegram whether a\n"
+            "name can actually be claimed.\n"
+        )
+    else:
+        print(
+            "This path creates a session for the availability engine. The running\n"
+            "bot already logs in as the bot via BOT_TOKEN, so you normally do not\n"
+            "need to run this. To unlock account.checkUsername (the check that\n"
+            "makes 'free' mean 'claimable'), log in a USER account instead:\n"
+            "  python scripts/login_mtproto.py --user\n"
+        )
 
     await client.start()
     me = await client.get_me()
@@ -167,13 +191,14 @@ async def main(argv: list[str] | None = None) -> int:
     if getattr(me, "bot", False):
         print(
             "\n[!] That session is a BOT, not a user account.\n"
-            "    Availability checks still work through contacts.resolveUsername,\n"
-            "    but account.checkUsername is user-only and stays unavailable.\n"
-            "    For a full user session: run this script with --force and enter\n"
-            "    your PHONE NUMBER instead of a bot token."
+            "    account.checkUsername is user-only and stays unavailable.\n"
+            "    For a full user session: run with --user and enter a PHONE NUMBER."
         )
     else:
-        print("You can now start the bot: python -m app.main")
+        print(
+            "User session ready. Start the bot (python -m app.main) and 'free' will\n"
+            "now mean 'Telegram would let you claim it right now'."
+        )
 
     await client.disconnect()
     return 0

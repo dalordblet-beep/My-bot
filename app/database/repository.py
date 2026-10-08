@@ -13,6 +13,7 @@ from app.database.models import (
     Battle,
     BotSetting,
     Favorite,
+    PortfolioItem,
     Search,
     Trap,
     User,
@@ -721,6 +722,82 @@ async def remove_favorite(session: AsyncSession, user: User, favorite_id: int) -
 async def count_favorites(session: AsyncSession, telegram_id: int) -> int:
     result = await session.execute(
         select(func.count(Favorite.id)).where(Favorite.telegram_id == telegram_id)
+    )
+    return int(result.scalar_one())
+
+
+# --------------------------------------------------------------------------- portfolio
+async def add_portfolio(
+    session: AsyncSession, user: User, username: str, note: str | None = None
+) -> tuple[PortfolioItem, bool]:
+    name = username.strip().lstrip("@").lower()
+    result = await session.execute(
+        select(PortfolioItem).where(
+            PortfolioItem.telegram_id == user.telegram_id,
+            PortfolioItem.username == name,
+        )
+    )
+    existing = result.scalar_one_or_none()
+    if existing is not None:
+        return existing, False
+    item = PortfolioItem(
+        user_id=user.id, telegram_id=user.telegram_id,
+        username=name, note=(note or None),
+    )
+    session.add(item)
+    await session.flush()
+    return item, True
+
+
+async def list_portfolio(
+    session: AsyncSession, user: User, limit: int = 100
+) -> Sequence[PortfolioItem]:
+    result = await session.execute(
+        select(PortfolioItem)
+        .where(PortfolioItem.telegram_id == user.telegram_id)
+        .order_by(PortfolioItem.created_at.asc())
+        .limit(limit)
+    )
+    return result.scalars().all()
+
+
+async def get_portfolio_item(
+    session: AsyncSession, item_id: int
+) -> PortfolioItem | None:
+    result = await session.execute(
+        select(PortfolioItem).where(PortfolioItem.id == item_id)
+    )
+    return result.scalar_one_or_none()
+
+
+async def remove_portfolio(session: AsyncSession, user: User, item_id: int) -> bool:
+    result = await session.execute(
+        select(PortfolioItem).where(
+            PortfolioItem.id == item_id, PortfolioItem.telegram_id == user.telegram_id
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        return False
+    await session.delete(row)
+    await session.flush()
+    return True
+
+
+async def update_portfolio_value(
+    session: AsyncSession, item: PortfolioItem, price: str | None, status: str
+) -> None:
+    item.last_price = price
+    item.last_status = status
+    item.last_checked_at = utcnow()
+    await session.flush()
+
+
+async def count_portfolio(session: AsyncSession, telegram_id: int) -> int:
+    result = await session.execute(
+        select(func.count(PortfolioItem.id)).where(
+            PortfolioItem.telegram_id == telegram_id
+        )
     )
     return int(result.scalar_one())
 

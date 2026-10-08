@@ -207,6 +207,8 @@ async def clean_state(database, mock_session, captcha_service, dispatcher, page_
     runtime._overrides = {}
     mtproto_client._ready = False
     mtproto_client._client = None
+    mtproto_client._user_clients = []
+    mtproto_client._user_turn = 0
     yield
 
 
