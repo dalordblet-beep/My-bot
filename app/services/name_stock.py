@@ -41,10 +41,6 @@ logger = get_logger(__name__)
 # The shapes the harvester keeps in stock. The length is the user's filter and
 # the most requested values are the short ones, so those are refilled first.
 HARVEST_LENGTHS = (5, 6, 7, 8)
-# How often the harvester may spend a *harvest* confirmation relative to the
-# pool's own pace. Two means the harvester never takes more than half of the
-# spare capacity: live searches always come first.
-HARVEST_PACE_FACTOR = 2.0
 
 
 class NameStock:
