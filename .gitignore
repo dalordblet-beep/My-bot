@@ -6,6 +6,9 @@
 *.session
 *.session-journal
 user_session_base64.txt
+# The repository is PUBLIC: any file holding a token or a session must be
+# ignored by name, or one `git add -A` publishes full access to the bots.
+_pool_line.txt
 
 # Local SQLite database
 *.db
