@@ -29,7 +29,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Iterator
 
 from app.collectible.checker import CollectibleChecker
-from app.collectible.valuation import estimate_price
+from app.collectible.valuation import estimate_price, price_basis
 from app.config import settings
 from app.search.generator import (
     UsernameGenerator,
@@ -220,16 +220,33 @@ class UsernameFinder:
         # exactly what the tests and one-off runs want.
         self._stock = stock
 
-    async def _price(self, name: str) -> int | None:
-        """One-number market estimate from live Fragment comparables."""
+    async def _price(self, name: str) -> dict:
+        """The market estimate **and the listings it rests on**.
+
+        A bare number invites the reader to treat it as a valuation of *this*
+        name. Returning the spread and the comparable count alongside it lets the
+        result screen show its work - and ``None`` is a real answer, meaning the
+        market holds nothing comparable, so no honest price exists. There is no
+        substituted fallback figure: an invented price is worse than no price.
+        """
+        empty = {"price": None, "price_low": None, "price_high": None, "price_comps": 0}
         if self._collectible is None:
-            return None
+            return empty
         try:
             listings = await self._collectible.fragment.market_listings()
         except Exception as exc:  # pragma: no cover - network dependent
             logger.debug("price estimate failed for %s: %s", name, exc)
-            return None
-        return estimate_price(name, listings)
+            return empty
+
+        basis = price_basis(name, listings)
+        if basis is None:
+            return empty
+        return {
+            "price": estimate_price(name, listings),
+            "price_low": round(basis.low),
+            "price_high": round(basis.high),
+            "price_comps": basis.count,
+        }
 
     def _candidates(self, criteria: SearchCriteria):
         """An ordered iterator of candidate names that satisfy local filters.
@@ -650,7 +667,7 @@ class UsernameFinder:
             reason="free_found",
             basic=basic,
             generated_tries=state.screened,
-            value={**estimate_value(name), "price": await self._price(name)},
+            value={**estimate_value(name), **await self._price(name)},
             fragment_clear=fragment_clear,
             fragment_checked=fragment_checked,
         )
@@ -901,7 +918,7 @@ class UsernameFinder:
                             hit=True,
                             reason="free_found",
                             basic=basic,
-                            value={**estimate_value(name), "price": await self._price(name)},
+                            value={**estimate_value(name), **await self._price(name)},
                             fragment_clear=fragment_clear,
                             fragment_checked=fragment_checked,
                         )

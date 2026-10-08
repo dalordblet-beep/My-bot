@@ -167,7 +167,14 @@ EN: dict[str, str] = {
     ),
     "collectible.need_login_short": "{hourglass} Temporarily unavailable",
     "collectible.min_bid": "min bid {value} TON",
-    "value.estimate": "{chart} Estimated price: <b>≈ {price} TON</b>",
+    "value.estimate": (
+        "{chart} Comparable names are asking <b>{low}-{high} TON</b> on Fragment "
+        "right now (median <b>≈ {price} TON</b>, {n} live listings)"
+    ),
+    "value.no_market": (
+        "{info} No comparable listing on Fragment - this name is not a traded "
+        "collectible, so there is no honest price to quote."
+    ),
     "value.wordlike": "looks like a real word - premium over random",
 
     # ---------------------------------------------------------------- scan
@@ -450,6 +457,14 @@ EN: dict[str, str] = {
     "search.p_collectible": "Collectible length (4-7)",
     "search.p_readable": "Readable",
     "search.p_dictionary": "Real dictionary word",
+    # The failed case must read as a statement too. Printing "Real dictionary
+    # word" with a cross next to it still reads like a claim about the name -
+    # which is how a random handle ended up looking like a dictionary word.
+    "search.pn_no_digits": "Contains digits",
+    "search.pn_no_separators": "Contains separators",
+    "search.pn_collectible": "Ordinary length",
+    "search.pn_readable": "Not readable out loud",
+    "search.pn_dictionary": "Not a dictionary word",
     "search.premium_badge": "Premium quality: {value}/5",
     "search.premium_ok": "{check} {label}",
     "search.premium_no": "{cross} {label}",
@@ -1049,7 +1064,14 @@ RU: dict[str, str] = {
     ),
     "collectible.need_login_short": "{hourglass} Временно недоступно",
     "collectible.min_bid": "мин. ставка {value} TON",
-    "value.estimate": "{chart} Примерная цена: <b>≈ {price} TON</b>",
+    "value.estimate": (
+        "{chart} Похожие имена сейчас просят <b>{low}–{high} TON</b> на Fragment "
+        "(медиана <b>≈ {price} TON</b>, живых лотов: {n})"
+    ),
+    "value.no_market": (
+        "{info} Сравнимых лотов на Fragment нет — имя не торгуется как "
+        "коллекционное, поэтому честной цены для него не существует."
+    ),
     "value.wordlike": "похоже на настоящее слово — дороже случайного набора",
 
     # ---------------------------------------------------------------- scan
@@ -1333,6 +1355,11 @@ RU: dict[str, str] = {
     "search.p_collectible": "Коллекционная длина (4-7)",
     "search.p_readable": "Читается",
     "search.p_dictionary": "Настоящее слово из словаря",
+    "search.pn_no_digits": "С цифрами",
+    "search.pn_no_separators": "С разделителями",
+    "search.pn_collectible": "Обычная длина",
+    "search.pn_readable": "Не читается вслух",
+    "search.pn_dictionary": "Не словарное слово",
     "search.premium_badge": "Премиум-качество: {value}/5",
     "search.premium_ok": "{check} {label}",
     "search.premium_no": "{cross} {label}",

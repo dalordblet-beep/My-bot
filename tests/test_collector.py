@@ -121,27 +121,37 @@ def _five_char_premium_listings():
     ]
 
 
-def test_estimate_price_ordinary_digit_name_is_floored_low():
-    """A random digit-bearing 5-char name must NOT inherit premium prices."""
+def test_estimate_price_ordinary_digit_name_has_no_price():
+    """A random digit-bearing name has no comparable, so it has **no price**.
+
+    It used to get an invented floor from a hard-coded table - a number that was
+    not market data at all, printed next to a real listing count and read as a
+    valuation. The honest answer is "nothing comparable on the market".
+    """
     listings = _five_char_premium_listings()
-    price = estimate_price("iduc9", listings)
-    assert isinstance(price, int)
-    assert price < 100  # floored, nowhere near the thousands of its length-peers
+    assert estimate_price("iduc9", listings) is None
 
 
 def test_estimate_price_premium_word_uses_comparables():
     """A clean premium 5-char word is valued from its real same-length peers."""
     listings = _five_char_premium_listings()
     price = estimate_price("pizza", listings)
-    # median of the pool is 4000; the name is a genuine comparable, not floored.
+    # median of the pool is 4000; the name is a genuine comparable.
+    assert price is not None
     assert 2000 <= price <= 7000
 
 
 def test_estimate_price_monotonic_rarer_costs_more():
-    """Cleaner/shorter -> higher than ordinary/same-or-longer."""
-    listings = _five_char_premium_listings()
-    premium = estimate_price("pizza", listings)       # clean 5-char word
-    ordinary = estimate_price("iduc9", listings)       # random 5-char w/ digits
+    """Cleaner/shorter -> higher than ordinary, when both have comparables."""
+    listings = _five_char_premium_listings() + [
+        # Enough digit peers to form a real comparable set.
+        FragmentListing("gupo6", "40", None, "u"),
+        FragmentListing("ve7ci", "60", None, "u"),
+        FragmentListing("ge2vo", "80", None, "u"),
+    ]
+    premium = estimate_price("pizza", listings)   # clean 5-char word
+    ordinary = estimate_price("iduc9", listings)  # random 5-char w/ digits
+    assert premium is not None and ordinary is not None
     assert premium > ordinary
 
 
@@ -149,15 +159,27 @@ def test_estimate_price_no_market_data_is_none():
     assert estimate_price("pizza", []) is None
 
 
-def test_estimate_price_digit_name_compares_to_digit_peers():
+def test_estimate_price_digit_name_never_borrows_clean_prices():
     """A digit name only borrows from digit listings, never clean ones."""
-    # All-clean premium pool, plus one modest digit peer. With too few digit
-    # peers to form a comparable set, the name is floored - never priced like
-    # the clean thousands-of-TON names it shares a length with.
+    # A clean premium pool, plus a single modest digit peer: not enough digit
+    # peers to form a comparable set, so there is no price at all - the name is
+    # never priced like the thousands-of-TON clean names it shares a length with.
     listings = _five_char_premium_listings() + [
         FragmentListing("gupo6", "40", None, "u"),
     ]
-    assert estimate_price("iduc9", listings) <= 60
+    assert estimate_price("iduc9", listings) is None
+
+
+def test_price_basis_reports_the_listings_it_rests_on():
+    """The estimate must be auditable: spread and count, from real listings."""
+    from app.collectible.valuation import price_basis
+
+    basis = price_basis("pizza", _five_char_premium_listings())
+    assert basis is not None
+    assert basis.count == 5
+    assert basis.low == 2000 and basis.high == 7000
+    assert basis.median == 4000
+    assert price_basis("iduc9", _five_char_premium_listings()) is None
 
 
 # --------------------------------------------------------------------- portfolio

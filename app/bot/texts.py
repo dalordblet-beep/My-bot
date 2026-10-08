@@ -22,12 +22,15 @@ SEP = "\u2501" * 12
 
 # The five premium criteria, in display order. Each entry is
 # ``(Premium attribute, i18n key)``; the verdict is N/5, never a 0-100 average.
+# (attribute, label when it holds, label when it does not). Every row must be
+# true as printed: a failed criterion shown as "Real dictionary word" with a
+# cross still reads as a claim that the name is a word.
 PREMIUM_KEYS = (
-    ("no_digits", "search.p_no_digits"),
-    ("no_separators", "search.p_no_separators"),
-    ("collectible", "search.p_collectible"),
-    ("readable", "search.p_readable"),
-    ("dictionary", "search.p_dictionary"),
+    ("no_digits", "search.p_no_digits", "search.pn_no_digits"),
+    ("no_separators", "search.p_no_separators", "search.pn_no_separators"),
+    ("collectible", "search.p_collectible", "search.pn_collectible"),
+    ("readable", "search.p_readable", "search.pn_readable"),
+    ("dictionary", "search.p_dictionary", "search.pn_dictionary"),
 )
 
 # Safety bound for the FAQ walk in :func:`faq_screen`. Ten questions fit
@@ -710,10 +713,10 @@ def premium_block(lang: str, premium) -> list[str]:
     five no matter how "average" the name looks.
     """
     lines: list[str] = []
-    for attr, key in PREMIUM_KEYS:
+    for attr, ok_key, no_key in PREMIUM_KEYS:
         ok = bool(getattr(premium, attr, False))
         template = "search.premium_ok" if ok else "search.premium_no"
-        lines.append(t(lang, template, label=t(lang, key)))
+        lines.append(t(lang, template, label=t(lang, ok_key if ok else no_key)))
     lines += ["", t(lang, "search.premium_badge", value=premium.total)]
     return lines
 
@@ -834,7 +837,23 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
         val = attempt.value
         price = val.get("price")
         if price:
-            lines.append(t(lang, "value.estimate", price=f"{price:,}"))
+            # Show what the number rests on. A bare "≈150 TON" reads as a
+            # valuation of *this* name; the spread and the number of live
+            # listings behind the median make it what it really is - an asking
+            # price for comparable names on Fragment right now.
+            lines.append(
+                t(
+                    lang, "value.estimate",
+                    price=f"{price:,}",
+                    low=f"{val.get('price_low') or price:,}",
+                    high=f"{val.get('price_high') or price:,}",
+                    n=val.get("price_comps") or 0,
+                )
+            )
+        else:
+            # No comparable listing exists, so there is no price. Saying so is
+            # the honest answer - a substituted figure would be an invention.
+            lines.append(t(lang, "value.no_market"))
         if val.get("wordlike"):
             lines.append(t(lang, "value.wordlike"))
 

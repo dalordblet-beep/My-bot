@@ -80,6 +80,30 @@ def test_scan_progress_and_complete_render():
     assert "Available: 2" in complete
 
 
+def test_a_failed_criterion_never_reads_as_a_claim():
+    """Every premium row must be true as printed.
+
+    A cross next to "Real dictionary word" still reads as a claim about the name
+    - which is how a random handle came to look like a dictionary word. The
+    failed case has to say the opposite.
+    """
+    from app.bot import texts
+    from app.search.pattern import premium_rating
+
+    premium = premium_rating("feijw")
+    assert premium.dictionary is False
+
+    for lang, claimed, truthful in (
+        ("en", "Real dictionary word", "Not a dictionary word"),
+        ("ru", "Настоящее слово из словаря", "Не словарное слово"),
+    ):
+        body = "\n".join(texts.premium_block(lang, premium))
+        assert claimed not in body, f"{lang}: a failed criterion still claims it"
+        assert truthful in body, f"{lang}: the failure is not stated"
+        # The rows that DO hold keep their positive wording.
+        assert ("No digits" if lang == "en" else "Без цифр") in body
+
+
 def test_translations_have_full_parity():
     """Every key present in one language must exist in all of them."""
     reference = set(TRANSLATIONS["en"])
