@@ -100,6 +100,14 @@ class MtprotoClient:
         self._client: Any | None = None
         self._lock = asyncio.Lock()
         self._ready = False
+        # Optional pool of extra *bot* sessions (tokens from BotFather, no
+        # phone). Each entry: {"name", "client", "ready", "cooldown_until"}.
+        # Every session carries its own Telegram quota, so authoritative
+        # availability checks scale with the pool and a rate-limited session
+        # never stalls the others.
+        self._bot_clients: list[dict[str, Any]] = []
+        self._bot_turn = 0
+        self._main_cooldown = 0.0
         # Optional pool of user sessions, used only for account.checkUsername.
         # Each entry: {"name", "client", "ready", "cooldown_until"}.
         self._user_clients: list[dict[str, Any]] = []
@@ -112,6 +120,18 @@ class MtprotoClient:
     @property
     def ready(self) -> bool:
         return self._ready
+
+    @property
+    def resolve_ready(self) -> bool:
+        """True when any session able to run resolveUsername is loaded."""
+        return self._ready or any(entry["ready"] for entry in self._bot_clients)
+
+    @property
+    def bot_session_count(self) -> int:
+        """How many MTProto sessions are currently usable for resolves."""
+        return (1 if self._ready else 0) + sum(
+            1 for entry in self._bot_clients if entry["ready"]
+        )
 
     @property
     def user_ready(self) -> bool:
@@ -167,11 +187,69 @@ class MtprotoClient:
 
             if self._ready:
                 logger.info("mtproto connected and authorised")
+                await self._start_bot_pool()
         except Exception as exc:
             logger.error("mtproto start failed: %s", exc)
             self._client = None
             self._ready = False
         return self._ready
+
+    async def _start_bot_pool(self) -> None:
+        """Authorise extra bot sessions by token (BotFather tokens, no phone).
+
+        Every session carries its own Telegram quota, so the pool is how the
+        availability checks scale to many users: the engine rotates across the
+        sessions and a rate-limited one is parked while the next answers.
+        """
+        if self._bot_clients:
+            return
+        tokens = [
+            token for token in settings.bot_session_tokens
+            if token and token != settings.bot_token
+        ]
+        for index, token in enumerate(tokens, start=2):
+            name = f"{settings.mtproto_session}-p{index}"
+            try:
+                client = TelegramClient(name, settings.api_id, settings.api_hash)
+                await client.start(bot_token=token)
+                if not await client.is_user_authorized():
+                    # Same self-healing as the main session: a stale shell is
+                    # wiped and the bot logs in fresh by token.
+                    await self._drop(client)
+                    for suffix in (".session", ".session-journal"):
+                        path = Path(f"{name}{suffix}")
+                        try:
+                            if path.exists():
+                                path.unlink()
+                        except OSError as exc:  # pragma: no cover
+                            logger.debug("could not remove %s: %s", path, exc)
+                    client = TelegramClient(name, settings.api_id, settings.api_hash)
+                    await client.start(bot_token=token)
+                    if not await client.is_user_authorized():
+                        await self._drop(client)
+                        logger.warning("bot session %s is not authorised - skipped", name)
+                        continue
+                self._bot_clients.append(
+                    {"name": name, "client": client, "ready": True, "cooldown_until": 0.0}
+                )
+            except Exception as exc:
+                logger.warning("bot session %s failed to start: %s", name, exc)
+
+        ready = sum(1 for entry in self._bot_clients if entry["ready"])
+        if ready:
+            logger.info(
+                "bot session pool ready: %d extra session(s), %d total for resolves",
+                ready, self.bot_session_count,
+            )
+
+    @staticmethod
+    async def _drop(client: Any) -> None:
+        """Disconnect an arbitrary client, ignoring teardown errors."""
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
 
     def _remove_session_files(self) -> None:
         """Delete the on-disk session so a fresh login can start clean."""
@@ -191,18 +269,16 @@ class MtprotoClient:
                 pass
 
     async def stop(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception:
-                pass
+        await self._drop(self._client)
+        for entry in self._bot_clients:
+            await self._drop(entry["client"])
         for entry in self._user_clients:
-            try:
-                await entry["client"].disconnect()
-            except Exception:
-                pass
+            await self._drop(entry["client"])
         self._client = None
         self._ready = False
+        self._bot_clients = []
+        self._bot_turn = 0
+        self._main_cooldown = 0.0
         self._user_clients = []
         self._user_turn = 0
 
@@ -302,13 +378,65 @@ class MtprotoClient:
                     continue
         return None
 
-    async def resolve_username(self, username: str) -> MtprotoResult:
-        if not self._ready or self._client is None:
-            return MtprotoResult("unknown", "mtproto_unavailable")
+    def _park(self, name: str, wait: float) -> None:
+        """Stop using one session until its FloodWait window has passed."""
+        until = asyncio.get_event_loop().time() + max(wait, 0.0)
+        if name == "main":
+            self._main_cooldown = until
+            return
+        for entry in self._bot_clients:
+            if entry["name"] == name:
+                entry["cooldown_until"] = until
+                return
 
-        async with self._lock:
+    def _soonest_recovery(self) -> float | None:
+        """Seconds until some parked session becomes usable again."""
+        now = asyncio.get_event_loop().time()
+        waits: list[float] = []
+        if self._ready and self._main_cooldown > now:
+            waits.append(self._main_cooldown - now)
+        waits.extend(
+            entry["cooldown_until"] - now
+            for entry in self._bot_clients
+            if entry["ready"] and entry["cooldown_until"] > now
+        )
+        return min(waits) if waits else None
+
+    async def resolve_username(self, username: str) -> MtprotoResult:
+        """Resolve a username across the whole session pool.
+
+        The main session is tried first, then the extra bot sessions in
+        rotation. A session that answers ``FloodWait`` is parked for the
+        requested window and the next one takes the call, so a rate-limited
+        account never stalls the pool. Only when **every** session is parked
+        does the caller see a ``flood`` result (with the soonest recovery
+        time), and a generic failure on all sessions reports ``error``.
+        """
+        candidates: list[tuple[str, Any]] = []
+        now = asyncio.get_event_loop().time()
+        if self._ready and self._client is not None and self._main_cooldown <= now:
+            candidates.append(("main", self._client))
+
+        ready = [
+            entry for entry in self._bot_clients
+            if entry["ready"] and entry["cooldown_until"] <= now
+        ]
+        if ready:
+            turn = self._bot_turn % len(ready)
+            self._bot_turn += 1
+            ordered = ready[turn:] + ready[:turn]
+            candidates.extend((entry["name"], entry["client"]) for entry in ordered)
+
+        if not candidates:
+            wait = self._soonest_recovery()
+            if wait is None:
+                return MtprotoResult("unknown", "mtproto_unavailable")
+            return MtprotoResult("flood", str(int(wait)))
+
+        last_error: str | None = None
+        for name, client in candidates:
             try:
-                response = await self._client(ResolveUsernameRequest(username))
+                response = await client(ResolveUsernameRequest(username))
             except UsernameNotOccupiedError:
                 return MtprotoResult("not_occupied")
             except UsernameInvalidError:
@@ -327,19 +455,30 @@ class MtprotoClient:
                 # hunting for a name Telegram answers USERNAME_NOT_OCCUPIED for,
                 # which is the only signal it honours at claim time.
                 return MtprotoResult("invalid")
-            except FloodWaitError as exc:  # pragma: no cover - network dependent
-                return MtprotoResult("flood", str(exc.seconds))
             except UsernameOccupiedError:
                 return MtprotoResult("occupied", "occupied_error")
+            except FloodWaitError as exc:  # pragma: no cover - network dependent
+                wait = float(getattr(exc, "seconds", 60) or 60)
+                self._park(name, wait)
+                logger.warning("mtproto session %s flood wait %ss - parked", name, int(wait))
+                continue
             except Exception as exc:
-                name = type(exc).__name__
-                if "FloodWait" in name:
-                    seconds = getattr(exc, "seconds", None)
-                    return MtprotoResult("flood", str(seconds) if seconds else None)
-                logger.debug("resolve_username(%s) failed: %s", username, exc)
-                return MtprotoResult("error", name)
+                cls = type(exc).__name__
+                if "FloodWait" in cls:
+                    wait = float(getattr(exc, "seconds", 60) or 60)
+                    self._park(name, wait)
+                    logger.warning("mtproto session %s flood wait %ss - parked", name, int(wait))
+                    continue
+                last_error = cls
+                logger.debug("resolve_username(%s) via %s failed: %s", username, name, exc)
+                continue
 
             return self._classify(response)
+
+        if last_error:
+            return MtprotoResult("error", last_error)
+        wait = self._soonest_recovery() or 60.0
+        return MtprotoResult("flood", str(int(wait)))
 
     async def collectible_info(self, username: str) -> MtprotoCollectible | None:
         """Authoritative collectible lookup via ``fragment.getCollectibleInfo``.

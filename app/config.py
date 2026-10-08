@@ -53,6 +53,13 @@ class Settings(BaseSettings):
     # the next one is used. Empty means "just the single session above".
     # Create each with: python scripts/login_mtproto.py --user --name <base>
     mtproto_user_sessions: str = ""
+    # Optional POOL of extra BOT tokens (comma separated, made in BotFather).
+    # Each token gets its own MTProto session and its own Telegram quota, so
+    # authoritative availability checks scale with the pool: a rate-limited
+    # session is parked and the next one answers. No phone number is ever
+    # needed - bot sessions authorise by token, exactly like the main one.
+    # Empty means "just the main bot session".
+    mtproto_bot_sessions: str = ""
     # Optional image sent next to the main menu (welcome / home). Set to an
     # absolute path of a local .jpg/.png. Left empty or pointing at a missing
     # file to send no image. Overridable via the MENU_IMAGE_PATH env var.
@@ -180,6 +187,11 @@ class Settings(BaseSettings):
         if self.mtproto_user_session and self.mtproto_user_session not in names:
             names.insert(0, self.mtproto_user_session)
         return names
+
+    @property
+    def bot_session_tokens(self) -> List[str]:
+        """Extra bot tokens for the MTProto session pool (no phone needed)."""
+        return [token for token in _split_csv(self.mtproto_bot_sessions) if token]
 
     @property
     def channel_configured(self) -> bool:

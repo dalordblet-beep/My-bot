@@ -208,7 +208,12 @@ class UsernameChecker:
 
     # ------------------------------------------------------------------ internals
     async def _resolve(self, name: str, allow_public_free: bool = False) -> CheckResult:
-        if mtproto_client.ready:
+        if mtproto_client.resolve_ready:
+            # The safe per-account pace is shared across the whole session pool:
+            # N sessions can carry N times the resolves at the same per-account
+            # rate, so the global interval shrinks with the pool.
+            pool = max(1, mtproto_client.bot_session_count)
+            self._limiter.min_interval = max(0.35, settings.request_delay / pool)
             await self._limiter.acquire()
             mt = await mtproto_client.resolve_username(name)
 
@@ -243,8 +248,15 @@ class UsernameChecker:
                 )
             if mt.kind == "flood":
                 seconds = float(mt.detail or 0) + settings.floodwait_safety_margin
-                self._limiter.pause(seconds)
                 shared_flood_budget.record(seconds)
+                # Every MTProto session is parked. The account-free signals
+                # (Bot API + public page) cost no MTProto quota and can still
+                # screen names out, so a temporary Telegram limit degrades the
+                # bot instead of taking it down.
+                probe = await self._bot_api_probe(name, "flood_wait", allow_public_free)
+                if probe.status is not CheckStatus.UNKNOWN:
+                    return probe
+                self._limiter.pause(seconds)
                 return CheckResult(
                     username=name, status=CheckStatus.RATE_LIMITED, source="mtproto",
                     reason="flood_wait", detail=str(int(seconds)),
