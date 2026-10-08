@@ -442,6 +442,21 @@ EN: dict[str, str] = {
     "search.progress_checked": (
         "{bolt} Checked: <b>{n}</b> · confirmed <b>{c}</b> · {s}s"
     ),
+    "search.progress_title": "{search} <b>Searching for a free username…</b>",
+    "search.progress_activity_screening": "{compass} <i>Scanning public pages…</i>",
+    "search.progress_activity_confirming": "{gem} <i>Confirming availability…</i>",
+    "search.progress_activity_public_confirm": "{globe} <i>Checking public sources…</i>",
+    "search.progress_activity_finished": "{check} <i>Finalising the result…</i>",
+    "search.progress_result_free": "{check} free",
+    "search.progress_result_taken": "{cross} taken",
+    "search.progress_result_reserved": "{warn} reserved",
+    "search.progress_result_unknown": "{hourglass} unclear",
+    "search.progress_result_checked": "{compass} checked",
+    "search.progress_last": "{target} <code>@{name}</code> → <b>{result}</b>",
+    "search.progress_stats": (
+        "{bolt} <b>{n}</b> names · <b>{rate}/s</b> · {stopwatch} <b>{s}s</b>"
+    ),
+    "search.progress_eta": "· ~{s}s left",
     "search.started": (
         "{search} <b>SEARCH RUNNING</b>\n\n"
         "The result will arrive right here - keep this screen open."
@@ -1353,6 +1368,21 @@ RU: dict[str, str] = {
     "search.progress_checked": (
         "{bolt} Проверено: <b>{n}</b> · подтверждено <b>{c}</b> · {s}с"
     ),
+    "search.progress_title": "{search} <b>Ищу свободный юзернейм…</b>",
+    "search.progress_activity_screening": "{compass} <i>Сканирую публичные страницы…</i>",
+    "search.progress_activity_confirming": "{gem} <i>Подтверждаю доступность…</i>",
+    "search.progress_activity_public_confirm": "{globe} <i>Проверяю публичные источники…</i>",
+    "search.progress_activity_finished": "{check} <i>Готовлю результат…</i>",
+    "search.progress_result_free": "{check} свободен",
+    "search.progress_result_taken": "{cross} занят",
+    "search.progress_result_reserved": "{warn} зарезервирован",
+    "search.progress_result_unknown": "{hourglass} неясно",
+    "search.progress_result_checked": "{compass} проверен",
+    "search.progress_last": "{target} <code>@{name}</code> → <b>{result}</b>",
+    "search.progress_stats": (
+        "{bolt} <b>{n}</b> имён · <b>{rate}/с</b> · {stopwatch} <b>{s}с</b>"
+    ),
+    "search.progress_eta": "· ~{s}с",
     "search.started": (
         "{search} <b>ПОИСК ЗАПУЩЕН</b>\n\n"
         "Результат придёт прямо сюда — не отходите от экрана."

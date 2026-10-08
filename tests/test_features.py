@@ -183,12 +183,13 @@ async def test_variants_respects_the_screening_cap(bot, monkeypatch):
     assert confirmations == 7
 
 
-async def test_variants_waits_out_a_flood_wait(bot, monkeypatch):
-    """Variants obey the same rule as a free search: a throttle is waited out.
+async def test_variants_keep_filling_through_a_flood_wait(bot, monkeypatch):
+    """Variants obey the same rule as a free search: a throttle never stops them.
 
     It used to stop dead on the first FloodWait, so a user asking for
     alternatives got an empty shortlist - the "Telegram is limiting us" dead end
-    in a different shape. Now the run holds on and asks again.
+    in a different shape. Now throttled confirmations are routed through the
+    public pages and the shortlist keeps filling.
     """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
@@ -222,9 +223,15 @@ async def test_variants_waits_out_a_flood_wait(bot, monkeypatch):
     assert attempt.variants
 
 
-async def test_variants_give_up_only_when_waiting_stops_helping(bot, monkeypatch):
-    """The honest last resort for variants: a throttle longer than the run may
-    last. It stays reachable, but only after the whole wait budget is gone."""
+async def test_variants_give_up_only_when_both_paths_are_dead(bot, monkeypatch):
+    """The honest last resort for variants: nothing the public pages can prove.
+
+    A permanently flooded session used to end the variants run with an
+    empty shortlist after waiting out the flood; now it just routes every
+    confirmation through the public path. The shortlist is empty only
+    when the public pages cannot settle any name either - the same honest
+    "nothing free" the session path gives, just reached faster.
+    """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult

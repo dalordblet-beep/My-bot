@@ -506,13 +506,14 @@ async def test_finder_answers_from_public_pages_on_a_long_flood_wait(bot, monkey
     assert attempt.public_confidence == "public"
 
 
-async def test_finder_waits_out_a_throttle_instead_of_giving_up(bot, monkeypatch):
-    """A throttle mid-run is waited out, never turned into a dead end.
+async def test_finder_keeps_hunting_when_a_throttle_mid_run(bot, monkeypatch):
+    """A FloodWait mid-run is routed around, never turned into a dead end.
 
     This is the regression behind "the bot keeps answering with 'Telegram is
-    limiting us'": a FloodWait used to end the run, so a user got an excuse
-    instead of a name. Now the search holds on, asks again, and delivers the
-    free name it was after.
+    limiting us'": a throttle used to end the run, so a user got an excuse
+    instead of a name. The search now confirms throttled names through the
+    public pages and keeps going; the moment a session answers again the
+    hunt delivers the free name it was after.
     """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
@@ -549,28 +550,26 @@ async def test_finder_waits_out_a_throttle_instead_of_giving_up(bot, monkeypatch
     assert seen >= 3
 
 
-async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, monkeypatch):
-    """The honest last resort, kept for the truly hopeless case.
+async def test_finder_never_reports_throttled_when_both_paths_are_dead(bot, monkeypatch):
+    """The throttle notice is gone - it was an excuse, not an answer.
 
-    Waiting out a throttle *extends* the working budget (waiting is not work), so
-    a permanently flooded search is stopped by the absolute ceiling. Even then it
-    does not give up: it hands the run to the public path. Only when the public
-    pages cannot settle the best candidate either does it fall back to the bare
-    throttle notice - and that is the only case this test reaches.
+    A permanently flooded session used to end the run with "Telegram is
+    limiting us", no matter what the public pages could prove. The search
+    now confirms every throttled name through the public path, so the
+    throttle message is unreachable by design: the worst case is an honest
+    ``unconfirmed`` / ``all_taken``, which tells the user the real reason
+    instead of blaming Telegram.
     """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult
 
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
-    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
-    # Waiting out a throttle *extends* the working budget (waiting is not work),
-    # so the only thing that can still stop a permanently flooded search is the
-    # absolute ceiling. Shrink both so the test does not actually sleep.
+    # No wait to skip, but keep the time budgets tiny so the test does not spin.
     monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
     monkeypatch.setattr(finder_module, "ABSOLUTE_SEARCH_SECONDS", 0.05)
-    # The public path is also dead here (no way to settle the name), which is the
-    # precondition for the throttle notice to be the final word.
+    # Both channels are dead: the session is permanently throttled and the
+    # public path cannot settle the name either.
     monkeypatch.setattr(
         "app.telegram.public_verdict.PublicVerdictClient.judge", _failing_judge
     )
@@ -588,7 +587,11 @@ async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, mon
         finder.find_one(SearchCriteria(length=7)), timeout=5
     )
 
-    assert attempt.reason == "throttled"
+    # The throttle message must never appear. The honest answer here is
+    # "unconfirmed" - the public pages could not settle any name, so we
+    # say so instead of pretending Telegram confirmed or denied anything.
+    assert attempt.reason != "throttled", "the throttle notice is unreachable by design"
+    assert attempt.reason == "unconfirmed"
     assert attempt.username == ""
     assert attempt.hit is False
     assert attempt.generated_tries > 1, "the search gave up without trying"
@@ -642,25 +645,21 @@ async def test_a_dead_session_falls_back_to_public_pages_instead_of_giving_up(
     assert attempt.basic.source == "public_verdict"
 
 
-async def test_throttle_wait_extends_the_working_budget(bot, monkeypatch):
-    """Time parked on a FloodWait must not be charged to the search's budget.
+async def test_a_throttled_session_does_not_freeze_the_search(bot, monkeypatch):
+    """A FloodWait mid-run never freezes the screen and never kills the hunt.
 
-    This is the regression behind "поиск остановлен после 10 проверок": with the
-    old pacing a single flood pushed the pool to 13.7s per call, so the 120
-    confirmations of an "unlimited" budget could never be spent inside
-    MAX_SEARCH_SECONDS and the run always ended on the throttle screen. Waiting
-    is not work: the deadline is pushed out by the wait, up to the absolute
-    ceiling, and the hunt continues until its *real* budget is spent.
+    This is the regression behind "the search sat at 1% for 218 seconds":
+    the old code waited out a throttle on the same name, so a flooded pool
+    could pin a run to the placeholder for minutes. The search now routes
+    every throttled confirmation through the public path instead, so the
+    hunt keeps moving and the free name it was after still arrives.
     """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult
 
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
-    # A wait long enough that it always overruns the (tiny) working budget - but
-    # far short of the absolute ceiling, so the search may keep going.
-    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.05)
-    monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.001)
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
 
     seen = 0
 

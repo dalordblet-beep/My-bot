@@ -387,48 +387,6 @@ class UsernameFinder:
             return max(free, short)
         return free
 
-    async def _wait_out_flood(
-        self,
-        state: "_SweepState",
-        progress=None,
-        snapshot: tuple[int, int, int] | None = None,
-    ) -> bool:
-        """Hold on until the throttled session pool comes back.
-
-        ``True`` = waited, carry on. ``False`` = waiting is pointless (the
-        recovery is further away than this search may *ever* last).
-
-        A FloodWait used to end the search with "Telegram is limiting us" - the
-        one answer the product must not give, because it is not a result, it is
-        an excuse. The wait is physical and cannot be argued with, so it is
-        *spent* rather than reported: the screen switches to the "waiting" phase
-        and keeps breathing, and the very same name is asked about again the
-        moment the pool is back.
-
-        The wait also **extends the working deadline** (up to the absolute
-        ceiling): time parked on a throttle is time the search did not get to
-        spend on its budget, so charging it against ``MAX_SEARCH_SECONDS`` was
-        what ended a 120-confirmation "unlimited" run after a dozen checks.
-        """
-        now = asyncio.get_event_loop().time()
-        wait = mtproto_client.flood_recovery_seconds
-        if not wait or wait <= 0:
-            # Nothing is parked, yet the check came back limited - wait one
-            # short beat and retry rather than spinning on the same call.
-            wait = FLOOD_RETRY_PAUSE
-        if now + wait > state.deadline:
-            # The working budget cannot absorb this wait, so push it out by the
-            # wait itself (waiting is not work) - but never past the hard
-            # ceiling, which is the one limit a flooded pool cannot extend.
-            if now + wait > state.absolute_deadline:
-                return False
-            state.deadline = now + wait
-        if progress is not None and snapshot is not None:
-            with contextlib.suppress(Exception):
-                progress("waiting", snapshot[0], snapshot[1], snapshot[2])
-        await asyncio.sleep(wait)
-        return True
-
     async def _public_fallback(
         self, state: "_SweepState", progress=None
     ) -> FindAttempt | None:
@@ -593,6 +551,19 @@ class UsernameFinder:
             screened_here += len(batch)
             state.occupied_seen += len(batch) - len(survivors)
 
+            # Live activity for the progress screen: every batch reports the last
+            # name it touched, so the bar keeps moving even between the (now
+            # rare) confirmations. This is what makes the search screen feel
+            # alive instead of frozen.
+            if progress is not None and batch:
+                with contextlib.suppress(Exception):
+                    progress(
+                        phase, state.confirmations, budget, state.screened,
+                        activity="screening",
+                        last_name=batch[-1],
+                        last_result="checked",
+                    )
+
             index = 0
             while index < len(survivors):
                 if state.confirmations >= budget:
@@ -602,35 +573,54 @@ class UsernameFinder:
                 basic = await self._checker.confirm_availability(name)
 
                 if basic.status is CheckStatus.RATE_LIMITED:
-                    # Telegram is throttling the pool. This is not a result and
-                    # must never be the last word: hold on until a session comes
-                    # back and then ask about the very same name again. The
-                    # search only stops when waiting itself stops making sense.
-                    if not await self._wait_out_flood(
-                        state, progress,
-                        (state.confirmations, budget, state.screened),
-                    ):
-                        # Waiting stopped helping - every session is parked for
-                        # longer than this search may ever last. Do NOT report the
-                        # throttle: the public pages need no session, so hand the
-                        # run over to them and answer with a real name instead of
-                        # "Telegram is limiting us".
-                        logger.warning(
-                            "search: telegram still throttling after the wait "
-                            "budget - switching to the public path",
+                    # Telegram is throttling every session in the pool. Waiting
+                    # it out would freeze the screen for the full recovery time
+                    # - the public pages need no account and answer in ~50ms,
+                    # so confirm THIS name through them instead of parking the
+                    # whole search on a flood recovery. The search never stops
+                    # here; it just routes around the rate limit. The throttle
+                    # message (``search.throttled``) is unreachable: the worst
+                    # case is an honest ``unconfirmed`` / ``all_taken``.
+                    try:
+                        verdict: PublicVerdict = await public_verdict_client.judge(name)
+                    except Exception as exc:
+                        # A dead public source must not kill the search.
+                        logger.debug("public confirm failed for %s: %s", name, exc)
+                        verdict = PublicVerdict(
+                            "unknown", "public_check_failed", confidence="none"
                         )
-                        public = await self._public_fallback(state, progress)
-                        if public is not None:
-                            return public
-                        return FindAttempt(
-                            username="",
-                            premium=state.best_premium or premium_rating(""),
-                            hit=False,
-                            reason="throttled",
-                            generated_tries=state.screened,
-                            value=estimate_value(state.best) if state.best else None,
+                    state.confirmations += 1
+                    index += 1
+                    if progress is not None:
+                        with contextlib.suppress(Exception):
+                            progress(
+                                phase, state.confirmations, budget, state.screened,
+                                activity="public_confirm",
+                                last_name=name,
+                                last_result=verdict.status,
+                            )
+                    if verdict.status == "free":
+                        # Genuinely trace-free on both public pages. Fragment
+                        # was already consulted inside ``judge``, so there is
+                        # no need to call the collectible checker again.
+                        basic = CheckResult(
+                            username=name,
+                            status=CheckStatus.AVAILABLE,
+                            source="public_verdict",
+                            detail="claimability_unverified",
                         )
-                    continue  # retry this name, not the next one
+                        attempt = await self._hit_attempt(
+                            name, basic, state,
+                            fragment_clear=True, fragment_checked=True,
+                        )
+                        attempt.public_confidence = verdict.confidence
+                        attempt.public_reason = verdict.reason
+                        return attempt
+                    if verdict.status in ("occupied", "reserved"):
+                        state.occupied_seen += 1
+                    else:
+                        state.unknown_seen += 1
+                    continue
 
                 state.confirmations += 1
                 index += 1
@@ -858,9 +848,18 @@ class UsernameFinder:
                 attempt.public_reason = verdict.reason
                 return attempt
 
-            if progress is not None:
+            if progress is not None and batch:
+                last_status = "checked"
+                for _n, _v in zip(batch, verdicts):
+                    if isinstance(_v, PublicVerdict):
+                        last_status = _v.status
                 with contextlib.suppress(Exception):
-                    progress("public", screened, screen_cap, screened)
+                    progress(
+                        "public", screened, screen_cap, screened,
+                        activity="public_confirm",
+                        last_name=batch[-1],
+                        last_result=last_status,
+                    )
 
         if best is not None:
             # Everything the public pages could see was taken. Say exactly that,
@@ -1163,13 +1162,6 @@ class UsernameFinder:
         screened = 0
         confirmations = 0
         screen_limit = min(len(candidates), VARIANT_SCREEN_CAP)
-        # A variants run shares the same waiting rules as a free search: the
-        # throttle is waited out and the working clock extended, bounded by the
-        # absolute ceiling. A minimal state carries those two clocks.
-        vstate = _SweepState()
-        now = asyncio.get_event_loop().time()
-        vstate.deadline = now + MAX_SEARCH_SECONDS
-        vstate.absolute_deadline = now + ABSOLUTE_SEARCH_SECONDS
         for start in range(0, screen_limit, VARIANT_SCREEN_BATCH):
             if len(free) >= VARIANTS_CAP or confirmations >= VARIANT_CONFIRM_BUDGET:
                 break
@@ -1183,20 +1175,43 @@ class UsernameFinder:
                 name = survivors[index]
                 basic = await self._checker.confirm_availability(name)
                 if basic.status is CheckStatus.RATE_LIMITED:
-                    # Same rule as a free search: a throttle is waited out, not
-                    # turned into a dead end. Anything already in ``free`` stays
-                    # authoritative and safe to return either way.
-                    if not await self._wait_out_flood(vstate):
-                        # Waiting stopped helping - finish the shortlist from the
-                        # public pages rather than ending on a throttle notice.
-                        logger.warning(
-                            "variants: telegram still throttling after the wait "
-                            "budget - completing from public pages",
+                    # Telegram is throttling the pool. A sessionless confirm
+                    # through the public pages keeps the shortlist filling
+                    # instead of freezing on a flood recovery: anything the
+                    # public verdict says is free becomes a variant (labelled
+                    # as such), anything else is skipped.
+                    try:
+                        verdict: PublicVerdict = await public_verdict_client.judge(name)
+                    except Exception as exc:
+                        logger.debug("variants: public confirm failed for %s: %s", name, exc)
+                        verdict = PublicVerdict(
+                            "unknown", "public_check_failed", confidence="none"
                         )
-                        public = await self._public_variants(criteria, base)
-                        public.variants = list(free) + list(public.variants or [])
-                        return public
-                    continue  # retry this name, not the next one
+                    confirmations += 1
+                    index += 1
+                    if verdict.status == "free":
+                        basic = CheckResult(
+                            username=name, status=CheckStatus.AVAILABLE,
+                            source="public_verdict", detail="claimability_unverified",
+                        )
+                        fragment_clear, fragment_checked = await self._fragment_verdict(name)
+                        if fragment_clear:
+                            free.append(
+                                FindAttempt(
+                                    username=name,
+                                    premium=premium_rating(letter_part(name)),
+                                    hit=True,
+                                    reason="free_found",
+                                    basic=basic,
+                                    value={**estimate_value(name), **await self._price(name)},
+                                    fragment_clear=fragment_clear,
+                                    fragment_checked=fragment_checked,
+                                    public_confidence=verdict.confidence,
+                                    public_reason=verdict.reason,
+                                )
+                            )
+                        continue
+                    continue
                 confirmations += 1
                 index += 1
                 if basic.status is CheckStatus.AVAILABLE:

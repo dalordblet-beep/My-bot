@@ -68,6 +68,15 @@ _BAR_FILLED = "▰"
 _BAR_EMPTY = "▱"
 _BAR_HEAD = "◆"
 
+# Maps the finder's ``last_result`` tag to the i18n key that renders it.
+_RESULT_KEYS: dict[str, str] = {
+    "free": "search.progress_result_free",
+    "occupied": "search.progress_result_taken",
+    "reserved": "search.progress_result_reserved",
+    "unknown": "search.progress_result_unknown",
+    "checked": "search.progress_result_checked",
+}
+
 
 @dataclass
 class SearchJob:
@@ -219,11 +228,29 @@ class SearchQueue:
         finder = UsernameFinder(self._checker, self._collectible, stock=self._stock)
         # Live counters for the progress screen; the finder's callback keeps
         # them truthful (real confirmations, real screening counts).
-        snapshot = {"phase": "valuable", "confirmations": 0, "budget": 0, "screened": 0}
+        # The animator reads this dict. ``activity`` / ``last_name`` / ``last_result``
+        # are the live signal that keeps the screen moving between confirmations;
+        # they default to harmless placeholders so callers that only pass the four
+        # legacy arguments still get a working (if less rich) frame.
+        snapshot = {
+            "phase": "valuable",
+            "confirmations": 0,
+            "budget": 0,
+            "screened": 0,
+            "activity": "screening",
+            "last_name": None,
+            "last_result": None,
+        }
 
-        def progress(phase: str, confirmations: int, budget: int, screened: int) -> None:
+        def progress(
+            phase: str, confirmations: int, budget: int, screened: int, **extras
+        ) -> None:
             snapshot.update(
-                phase=phase, confirmations=confirmations, budget=budget, screened=screened
+                phase=phase,
+                confirmations=confirmations,
+                budget=budget,
+                screened=screened,
+                **extras,
             )
 
         stop = asyncio.Event()
@@ -290,44 +317,79 @@ class SearchQueue:
         # The scan limit matches what the finder actually uses, so the bar
         # stays honest in unlimited mode too.
         cap = UNLIMITED_SCREEN_CAP if runtime.unlimited_search else SCREEN_CAP
-        # Two truthful sources of motion: authoritative checks move the bar in
-        # jumps, free screening creeps it forward between them.
+        # Two truthful sources of motion: confirmations (the scarce resource)
+        # and free screening (what carries the search now that the public path
+        # answers most checks). Either one moves the bar; together they keep it
+        # honest.
         share = max(confirmations / budget, screened / cap)
         share = min(share, 0.99)
         pct = max(1, round(share * 100))
         filled = max(1, min(BAR_CELLS - 1, round(BAR_CELLS * share)))
 
         # Fill the real progress, then run a scan-head through the empty track so
-        # the screen keeps breathing even between slow MTProto checks.
+        # the screen keeps breathing even between checks.
         remaining = BAR_CELLS - filled
         cells = [_BAR_FILLED] * filled + [_BAR_EMPTY] * remaining
         if remaining > 0:
             cells[filled + (step % remaining)] = _BAR_HEAD
         bar = "".join(cells)
-
         spinner = SPINNER_FRAMES[step % len(SPINNER_FRAMES)]
-        # The waiting phase is shown when the finder is sitting out a Telegram
-        # throttle instead of reporting it: the screen must say what is really
-        # happening, or a hold looks like a hang.
-        phase_key = {
-            "guarantee": "search.progress_phase_guarantee",
-            "waiting": "search.progress_phase_waiting",
-            "stock": "search.progress_phase_stock",
-        }.get(snapshot["phase"], "search.progress_phase_valuable")
-        seconds = int(time.monotonic() - started)
-        return "\n".join(
-            [
-                t(lang, "search.running"),
-                "",
-                f"<code>{bar}</code> <b>{pct}%</b>",
-                f"{spinner} {t(lang, phase_key)}",
-                # "Checked" counts every candidate examined - screening on the public page is
-                # a real check and it is the part that moves - while the
-                # authoritative confirmations are shown as their own number, so
-                # the screen never claims more proof than there is.
-                t(lang, "search.progress_checked", n=screened, c=confirmations, s=seconds),
-            ]
-        )
+
+        # ``activity`` is the live label the finder sets ("screening",
+        # "public_confirm", "finished", ...). ``phase`` is the legacy coarse
+        # bucket; it still picks the right message when ``activity`` is absent
+        # so older callers keep a working screen.
+        activity = snapshot.get("activity")
+        activity_key = {
+            "screening": "search.progress_activity_screening",
+            "confirming": "search.progress_activity_confirming",
+            "public_confirm": "search.progress_activity_public_confirm",
+            "finished": "search.progress_activity_finished",
+            "public": "search.progress_activity_public_confirm",
+        }.get(activity)
+        if activity_key is None:
+            activity_key = {
+                "guarantee": "search.progress_phase_guarantee",
+                "waiting": "search.progress_phase_waiting",
+                "stock": "search.progress_phase_stock",
+            }.get(snapshot.get("phase"), "search.progress_phase_valuable")
+
+        elapsed = max(int(time.monotonic() - started), 1)
+        rate = screened / elapsed if elapsed > 0 else 0.0
+        rate_text = f"{rate:.1f}"
+
+        lines = [
+            t(lang, "search.progress_title"),
+            "",
+            f"{spinner} {t(lang, activity_key)}",
+            f"<code>{bar}</code>  <b>{pct}%</b>",
+            t(lang, "search.progress_stats", n=screened, rate=rate_text, s=elapsed),
+        ]
+
+        # ETA only when it is meaningful (we are still screening and have a rate).
+        if activity != "finished" and screened > 0 and rate > 0:
+            eta_secs = int(max(0.0, (cap - screened) / rate))
+            if 0 < eta_secs < 9999:
+                lines.append(t(lang, "search.progress_eta", s=eta_secs))
+
+        # The "last candidate" line is what makes the screen feel alive between
+        # confirmations: every batch ends with the name and verdict of the most
+        # recent check, so something is always moving even during a slow step.
+        last_name = snapshot.get("last_name")
+        last_result = snapshot.get("last_result")
+        if last_name and last_result:
+            result_key = _RESULT_KEYS.get(last_result)
+            if result_key:
+                lines.append(
+                    t(
+                        lang,
+                        "search.progress_last",
+                        name=last_name,
+                        result=t(lang, result_key),
+                    )
+                )
+
+        return "\n".join(lines)
 
     @staticmethod
     def _result_keyboard(job: SearchJob, attempt):
