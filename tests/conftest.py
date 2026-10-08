@@ -70,6 +70,11 @@ def patched_settings(db_url):
         # Keep the original, conservative scan caps in tests: the live default
         # is unlimited (free bot), but tests must stay fast and deterministic.
         "unlimited_search": False,
+        # checkUsername is now the main availability call, so its pace is the
+        # bot's real throughput. Tests never touch Telegram, so they run it at
+        # the safety floor instead of the live 3s - otherwise a handful of
+        # confirmations would add half a minute to every search test.
+        "user_session_delay": 0.2,
     }
     for key, value in overrides.items():
         original[key] = getattr(settings, key)

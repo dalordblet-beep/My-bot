@@ -178,11 +178,23 @@ class UsernameChecker:
         return await mtproto_client.check_username(username)
 
     async def confirm_availability(self, username: str) -> CheckResult:
-        """Authoritative resolve - the only channel that can say AVAILABLE.
+        """The authoritative verdict, in **one** call.
 
-        Spends one MTProto call, so callers must treat it as the scarce
-        resource it is (~20-30 resolves/account/minute before FloodWait). A
-        cached verdict short-circuits the call entirely; OCCUPIED is kept long
+        This is ``account.checkUsername`` and nothing else. Telegram documents it
+        as the method that validates a username and checks availability, and it
+        is the only call that separates all four real outcomes - free, occupied,
+        for sale on Fragment, unassignable. It is also user-only, which is why
+        the bot session pool cannot help here.
+
+        ``contacts.resolveUsername`` used to run first, as a "primary" channel.
+        The documentation describes it as "resolve a @username to get peer info"
+        - a different question. It cannot tell a reserved name from a free one, so
+        the second call bought no extra certainty and doubled the quota cost of
+        every candidate. It is still used for the single-name *lookup* screen,
+        where the entity title it returns is worth showing; it is not part of the
+        availability verdict any more.
+
+        A cached verdict short-circuits the call entirely; OCCUPIED is kept long
         (it can only cause a miss, never a false "free") and AVAILABLE only
         briefly (somebody can claim the name within minutes).
         """
@@ -190,9 +202,56 @@ class UsernameChecker:
         if cached is not None:
             return cached
 
-        result = await self._resolve(username, allow_public_free=False)
+        result = await self._claim_verdict(username)
         self._verdicts.put(result)
         return result
+
+    async def _claim_verdict(self, name: str) -> CheckResult:
+        """Map one ``account.checkUsername`` answer onto a check result."""
+        verdict = await mtproto_client.claim_verdict(name)
+
+        if verdict.kind == "free":
+            return CheckResult(
+                username=name, status=CheckStatus.AVAILABLE,
+                source="mtproto_user", detail="claimability_verified",
+            )
+        if verdict.kind == "occupied":
+            return CheckResult(
+                username=name, status=CheckStatus.OCCUPIED,
+                source="mtproto_user", detail="claim_occupied",
+            )
+        if verdict.kind == "fragment":
+            # Not claimable for free - but it is *buyable*, which is information
+            # the user wants rather than a bare "taken".
+            return CheckResult(
+                username=name, status=CheckStatus.OCCUPIED,
+                source="mtproto_user", detail="purchase_available",
+            )
+        if verdict.kind == "invalid":
+            return CheckResult(
+                username=name, status=CheckStatus.INVALID,
+                source="mtproto_user", reason="not_assignable",
+            )
+        if verdict.kind == "flood":
+            seconds = float(verdict.detail or 0) + settings.floodwait_safety_margin
+            shared_flood_budget.record(seconds)
+            # The verdict call is throttled. The account-free signals cost no
+            # MTProto quota and can still prove OCCUPIED (a rendered profile
+            # card) - and, only when the operator has explicitly opted in, a
+            # positively-shaped free page. Otherwise the honest answer is
+            # "limited", which the search waits out.
+            probe = await self._bot_api_probe(name, "flood_wait")
+            if probe.status is not CheckStatus.UNKNOWN:
+                return probe
+            return CheckResult(
+                username=name, status=CheckStatus.RATE_LIMITED,
+                source="mtproto_user", reason="flood_wait", detail=str(int(seconds)),
+            )
+
+        # No session could answer. Fall back to the account-free signals, which
+        # can still prove OCCUPIED (a rendered public profile card) and never
+        # invent a "free" - the same rule as everywhere else.
+        return await self._bot_api_probe(name, verdict.detail or "no_verdict")
 
     async def check_free_candidate(self, username: str) -> CheckResult:
         """Screen a search candidate cheaply, then confirm it authoritatively.

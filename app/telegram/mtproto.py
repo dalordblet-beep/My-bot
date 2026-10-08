@@ -40,6 +40,11 @@ _PACE_SIGNAL_SECONDS = 900.0
 # a hang.
 _INTERVAL_CAP = 20.0
 
+# Hard floor between user-session calls. checkUsername is now the main
+# availability call, so its pace is the bot's real throughput knob - but it is
+# still an account-level limit, so it can never be removed entirely.
+_USER_INTERVAL_FLOOR = 0.2
+
 # How many pending join requests to read in one page when checking whether a
 # specific user is in the queue. The queue of a channel that approves by hand is
 # short; a page this wide covers it without paging.
@@ -582,31 +587,40 @@ class MtprotoClient:
             except OSError as exc:  # pragma: no cover - filesystem dependent
                 logger.debug("could not remove %s: %s", path, exc)
 
-    async def check_username(self, username: str) -> bool | None:
-        """Authoritative assignability test via the user-only checkUsername.
+    async def claim_verdict(self, username: str) -> MtprotoResult:
+        """The one authoritative availability call: ``account.checkUsername``.
 
-        This is the exact call the Telegram app makes when you type a username,
-        so it is the only signal that separates "nobody owns it" from "nobody
-        owns it *and* Telegram will not give it to you". The verdicts:
+        Telegram documents this method as the one that *"validates a username and
+        checks availability"*, and it is the only call that separates all four
+        real outcomes:
 
-        * ``True``  - claimable right now;
-        * ``False`` - occupied, or unassignable (``UsernameInvalidError``:
-          reserved / cooldown / anti-abuse / Fragment stock, which the app shows
-          as "incorrect username"), or listed for sale (``UsernamePurchaseAvailableError``);
-        * ``None`` - no verdict available (no session, or every session was
-          rate-limited / errored), so the caller stays best-effort.
+        * ``boolTrue``                     -> ``free``     - claimable right now;
+        * ``USERNAME_OCCUPIED`` / boolFalse -> ``occupied``;
+        * ``USERNAME_PURCHASE_AVAILABLE``  -> ``fragment`` - it is for sale on
+          fragment.com, so it cannot be taken for free;
+        * ``USERNAME_INVALID``             -> ``invalid``  - reserved, cooling
+          down, or otherwise not assignable.
 
-        Sessions are tried in rotation; a rate-limited one is parked for a while
-        and the next is used, so one busy account does not stall the pool.
+        ``contacts.resolveUsername`` is deliberately **not** part of this path.
+        The documentation describes it as "resolve a @username to get peer info":
+        it answers a different question, is not an availability check, and cannot
+        tell a reserved name from a free one. Using it as well cost a second call
+        per candidate and bought no extra certainty - and on a bot session it is
+        the call that got flooded.
+
+        Only a *user* account may call this at all ("Only users can use this
+        method"), which is why the bot pool cannot help here. Sessions are tried
+        in rotation and a rate-limited one is parked, so one busy account does
+        not stall the others.
         """
         ready = [e for e in self._user_clients if e["ready"]]
         if not ready:
-            return None
+            return MtprotoResult("unknown", "no_user_session")
 
         # The safe per-account rate divided by the number of live sessions:
         # one session carries the whole pace, N sessions share it.
         self._user_limiter.min_interval = max(
-            1.0, settings.user_call_delay / len(ready)
+            _USER_INTERVAL_FLOOR, settings.user_call_delay / len(ready)
         )
 
         now = asyncio.get_event_loop().time()
@@ -619,9 +633,14 @@ class MtprotoClient:
             async with self._lock:
                 await self._user_limiter.acquire()
                 try:
-                    return bool(await entry["client"](CheckUsernameRequest(username)))
-                except (UsernameInvalidError, UsernamePurchaseAvailableError):
-                    return False
+                    available = bool(await entry["client"](CheckUsernameRequest(username)))
+                    return MtprotoResult("free" if available else "occupied")
+                except UsernameOccupiedError:
+                    return MtprotoResult("occupied", "occupied_error")
+                except UsernamePurchaseAvailableError:
+                    return MtprotoResult("fragment", "purchase_available")
+                except UsernameInvalidError:
+                    return MtprotoResult("invalid")
                 except BotMethodInvalidError:
                     logger.warning("session %s is a bot - dropping it", entry["name"])
                     entry["ready"] = False
@@ -629,11 +648,42 @@ class MtprotoClient:
                 except FloodWaitError as exc:  # pragma: no cover - network dependent
                     wait = float(getattr(exc, "seconds", 60) or 60)
                     entry["cooldown_until"] = now + wait
-                    logger.warning("session %s flood wait %ss - parked", entry["name"], int(wait))
+                    logger.warning(
+                        "checkUsername session %s flood wait %ss - parked",
+                        entry["name"], int(wait),
+                    )
                     continue
                 except Exception as exc:
-                    logger.debug("checkUsername(%s) via %s failed: %s", username, entry["name"], exc)
+                    logger.debug(
+                        "checkUsername(%s) via %s failed: %s", username, entry["name"], exc
+                    )
                     continue
+
+        wait = min(
+            (
+                entry["cooldown_until"] - now
+                for entry in self._user_clients
+                if entry["ready"] and entry["cooldown_until"] > now
+            ),
+            default=0.0,
+        )
+        if wait > 0:
+            return MtprotoResult("flood", str(int(wait)))
+        return MtprotoResult("unknown", "no_session_answered")
+
+    async def check_username(self, username: str) -> bool | None:
+        """``claim_verdict`` reduced to yes/no/unknown.
+
+        ``True`` - claimable right now. ``False`` - occupied, for sale on
+        Fragment, or unassignable: in all three cases the name cannot be taken
+        for free, which is the only thing a caller cares about. ``None`` - no
+        session could answer, so the caller stays best-effort instead of guessing.
+        """
+        verdict = await self.claim_verdict(username)
+        if verdict.kind == "free":
+            return True
+        if verdict.kind in ("occupied", "fragment", "invalid"):
+            return False
         return None
 
     async def join_request_pending(self, chat_id: int, user_id: int) -> bool | None:
@@ -660,7 +710,7 @@ class MtprotoClient:
 
         # The user-only calls share one safe pace across the pool.
         self._user_limiter.min_interval = max(
-            1.0, settings.user_call_delay / len(ready)
+            _USER_INTERVAL_FLOOR, settings.user_call_delay / len(ready)
         )
 
         now = asyncio.get_event_loop().time()

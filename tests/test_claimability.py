@@ -28,19 +28,19 @@ def _available(name: str, detail: str | None) -> CheckResult:
 
 
 # ------------------------------------------------------------------- checker
-async def test_check_username_none_means_unverified(monkeypatch):
-    """A rate-limited user session answers nothing - the verdict must say so."""
+async def test_a_parked_gate_reports_limited_never_free(monkeypatch):
+    """A throttled user session answers nothing - and that must not read "free".
+
+    ``account.checkUsername`` is the verdict now, so a throttle is the only way
+    the answer can be missing - and it is reported as such instead of being
+    dressed up as an available name.
+    """
     client = mtproto_module.mtproto_client
 
-    async def fake_resolve(name):
-        return MtprotoResult("not_occupied")
+    async def parked(name):
+        return MtprotoResult("flood", "90")
 
-    async def no_verdict(name):
-        return None  # session parked / flooded
-
-    monkeypatch.setattr(client, "_ready", True, raising=False)
-    monkeypatch.setattr(client, "resolve_username", fake_resolve, raising=False)
-    monkeypatch.setattr(client, "check_username", no_verdict, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", parked, raising=False)
     monkeypatch.setattr(
         client, "_user_clients",
         [{"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}],
@@ -50,22 +50,18 @@ async def test_check_username_none_means_unverified(monkeypatch):
     checker = UsernameChecker(cache=None, bot=None)
     result = await checker.confirm_availability("recap")
 
-    assert result.status is CheckStatus.AVAILABLE
-    assert result.detail == "claimability_unverified"
+    assert result.status is CheckStatus.RATE_LIMITED
+    assert result.reason == "flood_wait"
 
 
-async def test_check_username_true_means_verified(monkeypatch):
+async def test_claimable_means_verified(monkeypatch):
+    """One definitive call, and the verdict is provable - not "probably"."""
     client = mtproto_module.mtproto_client
 
-    async def fake_resolve(name):
-        return MtprotoResult("not_occupied")
+    async def free(name):
+        return MtprotoResult("free")
 
-    async def yes(name):
-        return True
-
-    monkeypatch.setattr(client, "_ready", True, raising=False)
-    monkeypatch.setattr(client, "resolve_username", fake_resolve, raising=False)
-    monkeypatch.setattr(client, "check_username", yes, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", free, raising=False)
     monkeypatch.setattr(
         client, "_user_clients",
         [{"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}],
@@ -77,6 +73,67 @@ async def test_check_username_true_means_verified(monkeypatch):
 
     assert result.status is CheckStatus.AVAILABLE
     assert result.detail == "claimability_verified"
+
+
+async def test_an_occupied_name_is_reported_occupied(monkeypatch):
+    """USERNAME_OCCUPIED must map to OCCUPIED - it used to fall through as
+    "unknown", because the exception was never caught."""
+    client = mtproto_module.mtproto_client
+
+    async def occupied(name):
+        return MtprotoResult("occupied", "occupied_error")
+
+    monkeypatch.setattr(client, "claim_verdict", occupied, raising=False)
+
+    checker = UsernameChecker(cache=None, bot=None)
+    result = await checker.confirm_availability("durov")
+
+    assert result.status is CheckStatus.OCCUPIED
+
+
+async def test_a_fragment_lot_is_not_claimable_but_is_flagged(monkeypatch):
+    """USERNAME_PURCHASE_AVAILABLE means "for sale on Fragment": not free, but
+    the user should be told it can be bought rather than just "taken"."""
+    client = mtproto_module.mtproto_client
+
+    async def for_sale(name):
+        return MtprotoResult("fragment", "purchase_available")
+
+    monkeypatch.setattr(client, "claim_verdict", for_sale, raising=False)
+
+    checker = UsernameChecker(cache=None, bot=None)
+    result = await checker.confirm_availability("emanim")
+
+    assert result.status is CheckStatus.OCCUPIED
+    assert result.detail == "purchase_available"
+
+
+async def test_one_call_decides_availability(monkeypatch):
+    """The whole point of the new engine: one checkUsername call per candidate.
+
+    contacts.resolveUsername is not an availability check - the documentation
+    calls it "resolve a @username to get peer info" - so it must not run on this
+    path at all. It used to, which doubled the quota cost of every candidate.
+    """
+    client = mtproto_module.mtproto_client
+    calls = {"claim": 0, "resolve": 0}
+
+    async def claim(name):
+        calls["claim"] += 1
+        return MtprotoResult("free")
+
+    async def resolve(name):
+        calls["resolve"] += 1
+        return MtprotoResult("not_occupied")
+
+    monkeypatch.setattr(client, "claim_verdict", claim, raising=False)
+    monkeypatch.setattr(client, "resolve_username", resolve, raising=False)
+
+    checker = UsernameChecker(cache=None, bot=None)
+    result = await checker.confirm_availability("iduc9")
+
+    assert result.status is CheckStatus.AVAILABLE
+    assert calls == {"claim": 1, "resolve": 0}
 
 
 # -------------------------------------------------------------------- finder

@@ -205,12 +205,12 @@ async def test_mtproto_invalid_is_never_a_free_verdict(monkeypatch):
 
 # ------------------------------------- not_occupied is not the same as claimable
 async def test_unassignable_name_is_not_reported_free(monkeypatch):
-    """The ``bapug`` case: resolve says not_occupied, but it cannot be claimed.
+    """The ``bapug`` case: USERNAME_INVALID means it cannot be claimed.
 
     Telegram answers USERNAME_NOT_OCCUPIED for names it will still refuse to
     assign (reserved / cooldown / anti-abuse) - the app then says "incorrect
-    username". Only the user-only account.checkUsername separates the two, so
-    when a user session is available an unassignable name must not be AVAILABLE.
+    username". account.checkUsername is now the verdict itself and reports those
+    as USERNAME_INVALID, so they can never come back as AVAILABLE.
     """
     from app.telegram import mtproto as mtproto_module
     from app.telegram.mtproto import MtprotoResult
@@ -219,11 +219,9 @@ async def test_unassignable_name_is_not_reported_free(monkeypatch):
 
     client = mtproto_module.mtproto_client
 
-    async def fake_resolve(name):
-        return MtprotoResult("not_occupied")
-
     async def fake_check(name):
-        return False  # Telegram would not assign it
+        # Telegram answers USERNAME_INVALID: it will not assign this one.
+        return MtprotoResult("invalid")
 
     monkeypatch.setattr(client, "_ready", True, raising=False)
     monkeypatch.setattr(
@@ -231,8 +229,7 @@ async def test_unassignable_name_is_not_reported_free(monkeypatch):
         [{"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}],
         raising=False,
     )
-    monkeypatch.setattr(client, "resolve_username", fake_resolve, raising=False)
-    monkeypatch.setattr(client, "check_username", fake_check, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", fake_check, raising=False)
 
     checker = UsernameChecker(cache=None, bot=None)
     result = await checker.confirm_availability("bapug")
@@ -242,7 +239,7 @@ async def test_unassignable_name_is_not_reported_free(monkeypatch):
 
 
 async def test_assignable_name_stays_available(monkeypatch):
-    """When checkUsername confirms it, a not_occupied name is genuinely free."""
+    """When checkUsername says so, the name is genuinely free."""
     from app.telegram import mtproto as mtproto_module
     from app.telegram.mtproto import MtprotoResult
     from app.telegram.username_checker import UsernameChecker
@@ -250,11 +247,8 @@ async def test_assignable_name_stays_available(monkeypatch):
 
     client = mtproto_module.mtproto_client
 
-    async def fake_resolve(name):
-        return MtprotoResult("not_occupied")
-
     async def fake_check(name):
-        return True
+        return MtprotoResult("free")
 
     monkeypatch.setattr(client, "_ready", True, raising=False)
     monkeypatch.setattr(
@@ -262,8 +256,7 @@ async def test_assignable_name_stays_available(monkeypatch):
         [{"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}],
         raising=False,
     )
-    monkeypatch.setattr(client, "resolve_username", fake_resolve, raising=False)
-    monkeypatch.setattr(client, "check_username", fake_check, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", fake_check, raising=False)
 
     checker = UsernameChecker(cache=None, bot=None)
     result = await checker.confirm_availability("iduc9")

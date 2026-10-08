@@ -164,40 +164,77 @@ reporting "everything is taken".
 > matters. And most candidates are already owned — that is what makes the free
 > ones valuable.
 
-#### Why a search still finds a name when the bot is busy
+#### The verification engine: one call, and only the right one
 
-Telegram rate-limits the authoritative availability check hard — roughly 20-30
-calls per account per minute — and proving one name free costs several calls,
-because most candidates are taken. Three things keep the bot answering with a
-real name instead of an apology:
+Telegram rate-limits everything here, and the two available methods are not
+interchangeable. The engine is built around that distinction.
 
-1. **The session pool is a real pool.** Every live MTProto session — the main one
-   included — takes an equal share of the traffic in round-robin, so N tokens
-   give N times the throughput. Each token is its own account with its own quota,
-   and adding more is a one-line change to `MTPROTO_BOT_SESSIONS`.
-   `scripts/create_bot_sessions.py --count 10` creates them through BotFather for
-   you (it uses the user session, and appends the tokens to `.env`).
-2. **A throttle is waited out, never reported.** If every session is parked, the
-   search holds on until one comes back and asks about the very same name again.
-   The progress screen says so. The old behaviour — stopping with "Telegram is
-   limiting us" — is the one answer the product must never give, because it is
-   not a result. The only remaining path to that message is
-   `MAX_SEARCH_SECONDS` (default 240) running out.
-3. **A stock of already-verified names.** While the bot is idle a background
-   harvester spends the spare quota proving names free and stores them. A search
-   then serves one after **a single re-confirmation**, instead of paying for a
-   whole hunt. That is what makes a burst of users cheap: the same name that
-   would have cost a dozen lookups costs one. The stored name is *never* handed
-   over on the strength of the old verdict — if Telegram no longer answers
-   "claimable", it is dropped and the search carries on, so a stale entry can
-   never be delivered as free. Tune it with `NAME_STOCK_TARGET` (0 disables),
-   `NAME_STOCK_INTERVAL`, `NAME_STOCK_TTL` and `NAME_STOCK_HARVEST_SECONDS`.
+**`account.checkUsername` is the availability verdict.** The API documentation
+describes it as the method that *"validates a username and checks availability"*,
+and it is the only call that separates all four real outcomes:
 
-The claimability gate is the user session (see
-[Collectible usernames](#collectible-usernames--how-to-turn-them-on) — the same
-login). It is also a **second, independent channel**: when every *bot* session is
-parked, the user session can still answer `account.checkUsername`, so a search
-keeps producing verified names while the bot pool sits out its limit.
+| Answer | Meaning |
+|---|---|
+| `boolTrue` | free — claimable right now |
+| `USERNAME_OCCUPIED` | taken |
+| `USERNAME_PURCHASE_AVAILABLE` | for sale on [fragment.com](https://fragment.com) — not free, but **buyable**, which the bot reports instead of a bare "taken" |
+| `USERNAME_INVALID` | reserved, cooling down, or otherwise not assignable |
+
+It is also **user-only** — "Only users can use this method" — which is why the
+bot session pool cannot help with availability at all.
+
+**`contacts.resolveUsername` is not used for availability.** The documentation
+describes it as *"resolve a @username to get peer info"*: a different question.
+It cannot tell a reserved name from a free one, so running it as well cost a
+second call per candidate and bought no extra certainty. It is still used for the
+single-name *lookup* screen, where the entity title it returns is worth showing.
+
+So one candidate costs **one** call, not two — and the four outcomes above come
+back from that single answer.
+
+**Local filtering happens before Telegram is ever asked.** Length and charset are
+validated locally, the taste gates (quality floor, premium criteria, mask) reject
+candidates for free, and the public `t.me` page screens out most taken names with
+a plain HTTP GET that spends no quota at all. Only what survives that reaches the
+API.
+
+**Verdicts are cached, with a TTL per outcome.** A taken name stays taken and a
+reserved one stays reserved, so those are remembered for a day — and a stale
+"taken" can only ever cost a missed candidate, never a false "free". A *free*
+verdict is remembered for 60 seconds only, because somebody can claim the name
+within minutes. "We do not know" is never cached: that would turn a temporary
+outage into a permanent wrong answer.
+
+**A throttle is waited out, never reported.** If the session is rate-limited the
+search holds on and asks about the very same name again, and the progress screen
+says so. Stopping with "Telegram is limiting us" is the one answer the product
+must never give, because it is not a result. The only path to that message is
+`MAX_SEARCH_SECONDS` (default 240) running out.
+
+**A stock of already-verified names.** While the bot is idle a background
+harvester proves names free and stores them, so a search can serve one after a
+single re-confirmation instead of paying for a whole hunt. A stored name is
+*never* handed over on the strength of the old verdict — if Telegram no longer
+answers "claimable" it is dropped and the search carries on. Tune it with
+`NAME_STOCK_TARGET` (0 disables), `NAME_STOCK_INTERVAL`, `NAME_STOCK_TTL` and
+`NAME_STOCK_HARVEST_SECONDS`.
+
+##### What actually limits throughput
+
+Since `account.checkUsername` is both the verdict and user-only, **the user
+session is the ceiling on how many verified names per minute the bot can
+produce** — not the bot pool, and not the number of bot tokens. On one account
+that is roughly 20 per minute at the default `USER_SESSION_DELAY=3`.
+
+To go faster, either lower `USER_SESSION_DELAY` (the session parks itself on a
+`FloodWait`, so pushing too far degrades rather than breaks) or add accounts —
+each one adds its own quota:
+
+```
+MTPROTO_USER_SESSIONS=username_scanner_user2,username_scanner_user3
+```
+
+Create each with `python scripts/login_user_steps.py --name <base> send <phone>`.
 
 ### Premium verdict
 There is no 0-100 score any more. Every name is judged on **five yes/no

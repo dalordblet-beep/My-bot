@@ -135,24 +135,25 @@ async def test_every_session_shares_the_traffic(monkeypatch):
     assert main.calls == 2 and extra.calls == 2
 
 
-async def test_parked_bot_pool_falls_back_to_the_user_session(monkeypatch):
-    """When every bot session is parked, the user session still answers.
+async def test_the_verdict_never_touches_the_bot_pool(monkeypatch):
+    """A parked bot pool is now completely irrelevant to availability.
 
-    It is a different account with a quota of its own, and
-    ``account.checkUsername`` is the one call that can still say "claimable" -
-    so a fully parked bot pool slows a search down instead of ending it with a
-    throttle and no name.
+    ``account.checkUsername`` is the verdict, and only a user account may call it
+    ("Only users can use this method" - the docs say so outright). So the bot
+    sessions - the ones that get flooded - are not on this path at all.
     """
     client = mtproto_module.mtproto_client
+    touched = {"resolve": 0}
 
-    async def all_parked(name):
+    async def resolve(name):
+        touched["resolve"] += 1
         return MtprotoResult("flood", "90")
 
     async def claimable(name):
-        return True
+        return MtprotoResult("free")
 
-    monkeypatch.setattr(client, "resolve_username", all_parked, raising=False)
-    monkeypatch.setattr(client, "check_username", claimable, raising=False)
+    monkeypatch.setattr(client, "resolve_username", resolve, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", claimable, raising=False)
     monkeypatch.setattr(client, "_ready", True, raising=False)
     monkeypatch.setattr(client, "_client", None, raising=False)
     monkeypatch.setattr(settings, "request_delay", 0.0)
@@ -166,6 +167,7 @@ async def test_parked_bot_pool_falls_back_to_the_user_session(monkeypatch):
     assert result.status is CheckStatus.AVAILABLE
     assert result.source == "mtproto_user"
     assert result.detail == "claimability_verified"
+    assert touched["resolve"] == 0, "the bot pool must not be consulted at all"
 
 
 def test_a_ban_does_not_slow_the_healthy_sessions(monkeypatch):
@@ -206,14 +208,10 @@ async def test_a_fully_parked_pool_does_not_freeze_the_check(monkeypatch):
 
     client = mtproto_module.mtproto_client
 
-    async def all_parked(name):
-        return MtprotoResult("flood", "26000")
-
     async def claimable(name):
-        return True
+        return MtprotoResult("free")
 
-    monkeypatch.setattr(client, "resolve_username", all_parked, raising=False)
-    monkeypatch.setattr(client, "check_username", claimable, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", claimable, raising=False)
     monkeypatch.setattr(client, "_ready", True, raising=False)
     monkeypatch.setattr(client, "_client", None, raising=False)
     monkeypatch.setattr(client, "_bot_clients", [], raising=False)
@@ -303,7 +301,7 @@ async def test_check_username_is_paced_per_user_session(monkeypatch):
     monkeypatch.setattr(
         client, "_user_clients", [_session("u", FakeClient(lambda r: True))], raising=False
     )
-    monkeypatch.setattr(settings, "request_delay", 3.0)
+    monkeypatch.setattr(settings, "user_session_delay", 3.0)
 
     verdict = await client.check_username("whatever")
 
@@ -319,7 +317,7 @@ async def test_flood_falls_back_to_account_free_signals(monkeypatch):
     async def all_parked(name):
         return MtprotoResult("flood", "90")
 
-    monkeypatch.setattr(client, "resolve_username", all_parked, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", all_parked, raising=False)
     monkeypatch.setattr(client, "_ready", True, raising=False)
     monkeypatch.setattr(client, "_client", None, raising=False)
     monkeypatch.setattr(settings, "allow_bot_api_availability", True)
@@ -341,7 +339,7 @@ async def test_flood_with_no_signal_still_reports_rate_limited(monkeypatch):
     async def all_parked(name):
         return MtprotoResult("flood", "90")
 
-    monkeypatch.setattr(client, "resolve_username", all_parked, raising=False)
+    monkeypatch.setattr(client, "claim_verdict", all_parked, raising=False)
     monkeypatch.setattr(client, "_ready", True, raising=False)
     monkeypatch.setattr(client, "_client", None, raising=False)
     monkeypatch.setattr(settings, "allow_bot_api_availability", False)
@@ -356,39 +354,58 @@ async def test_flood_with_no_signal_still_reports_rate_limited(monkeypatch):
     assert result.reason == "flood_wait"
 
 
-async def test_pool_scales_the_shared_pace(monkeypatch):
-    """N sessions may carry N times the resolves at the same per-account rate,
-    with a safety margin away from the escalation threshold."""
+async def test_the_user_pool_scales_the_verdict_pace(monkeypatch):
+    """N user accounts carry N times the verdicts at the same per-account rate.
+
+    This is the number that matters now. ``account.checkUsername`` *is* the
+    availability verdict, only user accounts may call it, and the bot pool cannot
+    help - so the user-session pool is what sets the bot's real throughput, and
+    adding an account is the only thing that raises it.
+    """
     client = mtproto_module.mtproto_client
-
-    async def fine(name):
-        return MtprotoResult("not_occupied")
-
-    monkeypatch.setattr(client, "resolve_username", fine, raising=False)
-    monkeypatch.setattr(client, "_ready", True, raising=False)
-    monkeypatch.setattr(client, "_client", FakeClient(lambda r: _occupied_response()), raising=False)
     monkeypatch.setattr(
-        client, "_bot_clients",
-        [
-            _session("a", FakeClient(lambda r: _occupied_response())),
-            _session("b", FakeClient(lambda r: _occupied_response())),
-            _session("c", FakeClient(lambda r: _occupied_response())),
-        ],
+        client, "_user_clients",
+        [_session(f"u{i}", FakeClient(lambda r: True)) for i in range(4)],
         raising=False,
     )
-    assert client.bot_session_count == 4
-    monkeypatch.setattr(settings, "request_delay", 3.0)
-    client._pace_multiplier = 1.0
+    monkeypatch.setattr(settings, "user_session_delay", 3.0)
 
-    limiter = RateLimiter(min_interval=3.0)
-    checker = UsernameChecker(
-        cache=None, bot=None, rate_limiter=limiter,
-        page_probe=FakePageProbe(state="unknown"),
+    verdict = await client.claim_verdict("whatever")
+
+    assert verdict.kind == "free"
+    # 3.0s per account, divided by 4 live sessions.
+    assert client._user_limiter.min_interval == pytest.approx(3.0 / 4)
+
+
+async def test_occupied_and_for_sale_are_told_apart(monkeypatch):
+    """The three outcomes checkUsername documents, mapped without guessing.
+
+    Live behaviour is what matters here: Telegram raises USERNAME_OCCUPIED for a
+    taken name and USERNAME_PURCHASE_AVAILABLE for one that is for sale on
+    Fragment - and the second one is *not* the same as "taken", it is buyable.
+    """
+    from telethon.errors import (
+        UsernameInvalidError,
+        UsernameOccupiedError,
+        UsernamePurchaseAvailableError,
     )
-    await checker.check_free_candidate("whatever")
 
-    # 3.0s per account, divided by 4 sessions, times the 2x safety margin.
-    assert limiter.min_interval == pytest.approx(3.0 * 2.0 / 4)
+    client = mtproto_module.mtproto_client
+
+    cases = [
+        (UsernameOccupiedError(request=None), "occupied"),
+        (UsernamePurchaseAvailableError(request=None), "fragment"),
+        (UsernameInvalidError(request=None), "invalid"),
+    ]
+    for error, expected in cases:
+        def raiser(request, _error=error):
+            raise _error
+
+        monkeypatch.setattr(
+            client, "_user_clients", [_session("u", FakeClient(raiser))], raising=False
+        )
+        verdict = await client.claim_verdict("whatever")
+        assert verdict.kind == expected, f"{type(error).__name__} -> {verdict.kind}"
 
 
 def test_flood_backs_the_pool_pace_off_and_it_recovers(monkeypatch):
