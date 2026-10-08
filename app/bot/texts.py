@@ -817,6 +817,11 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
             t(lang, "search.fragment_ok") if attempt.fragment_checked
             else t(lang, "search.fragment_off")
         )
+        # Claimability could not be verified (no user session on this machine):
+        # "nobody owns it" is proven, "Telegram will hand it over" is not.
+        basic_detail = getattr(attempt.basic, "detail", None)
+        if basic_detail == "claimability_unverified":
+            lines.append(t(lang, "search.claim_unverified"))
 
     if attempt.value is not None:
         val = attempt.value

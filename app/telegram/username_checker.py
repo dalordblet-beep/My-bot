@@ -232,9 +232,16 @@ class UsernameChecker:
                             username=name, status=CheckStatus.INVALID,
                             source="mtproto_user", reason="not_assignable",
                         )
+                    return CheckResult(
+                        username=name, status=CheckStatus.AVAILABLE, source="mtproto",
+                        detail="claimability_verified",
+                    )
+                # No user session - the verdict is honest about what it could
+                # not check: "nobody owns it" is confirmed, "Telegram will give
+                # it to you" is not. The result screen states this caveat.
                 return CheckResult(
                     username=name, status=CheckStatus.AVAILABLE, source="mtproto",
-                    detail="no_owner",
+                    detail="claimability_unverified",
                 )
             if mt.kind == "occupied":
                 return CheckResult(

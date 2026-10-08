@@ -451,6 +451,10 @@ EN: dict[str, str] = {
     ),
     "search.fragment_ok": "{check} Fragment: not listed for sale or auction",
     "search.fragment_off": "{warn} Fragment: could not be checked (marketplace off)",
+    "search.claim_unverified": (
+        "{warn} Claimability not verified (no user session here) - Telegram may "
+        "still refuse this name. See the FAQ / ask support."
+    ),
     "search.attempts": "{bolt} Attempts used: <b>{n}</b>",
     "search.no_candidate": "{warn} Could not build a name for those criteria. Loosen the mask or allow digits.",
     "search.no_free_found": (
@@ -1313,6 +1317,10 @@ RU: dict[str, str] = {
     ),
     "search.fragment_ok": "{check} Fragment: не выставлено на продажу или аукцион",
     "search.fragment_off": "{warn} Fragment: проверить не удалось (маркетплейс выключен)",
+    "search.claim_unverified": (
+        "{warn} Возможность занятия не проверена (здесь нет user-сессии) — "
+        "Telegram может всё равно не отдать это имя."
+    ),
     "search.attempts": "{bolt} Попыток использовано: <b>{n}</b>",
     "search.no_candidate": "{warn} Не удалось собрать имя под эти критерии. Ослабьте маску или разрешите цифры.",
     "search.no_free_found": (
