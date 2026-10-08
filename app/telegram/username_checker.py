@@ -209,11 +209,10 @@ class UsernameChecker:
     # ------------------------------------------------------------------ internals
     async def _resolve(self, name: str, allow_public_free: bool = False) -> CheckResult:
         if mtproto_client.resolve_ready:
-            # The safe per-account pace is shared across the whole session pool:
-            # N sessions can carry N times the resolves at the same per-account
-            # rate, so the global interval shrinks with the pool.
-            pool = max(1, mtproto_client.bot_session_count)
-            self._limiter.min_interval = max(0.35, settings.request_delay / pool)
+            # The safe per-account pace is shared across the whole session pool,
+            # with a margin: these are fresh bot accounts, and running them at
+            # the bare 20/min threshold got them FloodWaited under load.
+            self._limiter.min_interval = mtproto_client.call_interval
             await self._limiter.acquire()
             mt = await mtproto_client.resolve_username(name)
 
@@ -266,7 +265,10 @@ class UsernameChecker:
                 probe = await self._bot_api_probe(name, "flood_wait", allow_public_free)
                 if probe.status is not CheckStatus.UNKNOWN:
                     return probe
-                self._limiter.pause(seconds)
+                # IMPORTANT: never pause the shared limiter here. With a pool,
+                # each session parks itself for exactly its own flood window;
+                # a global pause used to freeze EVERY call in the process for
+                # hours - searches hanging on "SEARCHING...", appraise stuck.
                 return CheckResult(
                     username=name, status=CheckStatus.RATE_LIMITED, source="mtproto",
                     reason="flood_wait", detail=str(int(seconds)),

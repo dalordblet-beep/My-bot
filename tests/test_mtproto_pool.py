@@ -10,6 +10,8 @@ falls back to the account-free signals instead of dying.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.config import settings
@@ -216,7 +218,8 @@ async def test_flood_with_no_signal_still_reports_rate_limited(monkeypatch):
 
 
 async def test_pool_scales_the_shared_pace(monkeypatch):
-    """N sessions may carry N times the resolves at the same per-account rate."""
+    """N sessions may carry N times the resolves at the same per-account rate,
+    with a safety margin away from the escalation threshold."""
     client = mtproto_module.mtproto_client
 
     async def fine(name):
@@ -244,4 +247,68 @@ async def test_pool_scales_the_shared_pace(monkeypatch):
     )
     await checker.check_free_candidate("whatever")
 
-    assert limiter.min_interval == pytest.approx(0.75)
+    # 3.0s per account, divided by 4 sessions, times the 1.5x safety margin.
+    assert limiter.min_interval == pytest.approx(3.0 * 1.5 / 4)
+
+
+# ------------------------------------------------- fragment (fragment.* calls)
+def _collectible_response():
+    """A fragment.getCollectibleInfo response shaped like a real one."""
+    return type(
+        "Info",
+        (),
+        {
+            "url": "https://fragment.com/username/x",
+            "purchase_date": None,
+            "amount": 1250,  # 12.50 USD
+            "currency": "USD",
+            "crypto_amount": 12_500_000_000,
+            "crypto_currency": "TON",
+        },
+    )()
+
+
+async def test_fragment_lookups_skip_parked_sessions_and_are_paced(monkeypatch):
+    """fragment.* used to run unpaced on the MAIN session - hammering an
+    already-flood-limited account. Now: pool rotation + shared pace."""
+    import asyncio
+
+    from app.utils.ratelimit import RateLimiter
+
+    client = mtproto_module.mtproto_client
+    flooding = FakeClient(lambda r: FloodWaitFake(500))
+    healthy = FakeClient(lambda r: _collectible_response())
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", flooding, raising=False)
+    monkeypatch.setattr(
+        client, "_main_cooldown",
+        asyncio.get_event_loop().time() + 999, raising=False,
+    )
+    monkeypatch.setattr(client, "_bot_clients", [_session("p2", healthy)], raising=False)
+    monkeypatch.setattr(client, "_fragment_limiter", RateLimiter(min_interval=0.0))
+
+    info = await client.collectible_info("somename")
+
+    assert info is not None
+    assert info.fiat_amount == 12.5
+    assert flooding.calls == 0 and healthy.calls == 1
+    assert client._fragment_limiter.min_interval == client.call_interval
+
+
+async def test_fragment_returns_none_when_every_session_is_parked(monkeypatch):
+    from app.utils.ratelimit import RateLimiter
+
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", FakeClient(lambda r: FloodWaitFake(500)), raising=False)
+    monkeypatch.setattr(
+        client, "_main_cooldown",
+        asyncio.get_event_loop().time() + 999, raising=False,
+    )
+    monkeypatch.setattr(
+        client, "_bot_clients",
+        [_session("p2", FakeClient(lambda r: FloodWaitFake(500)))], raising=False,
+    )
+    monkeypatch.setattr(client, "_fragment_limiter", RateLimiter(min_interval=0.0))
+
+    assert await client.collectible_info("somename") is None

@@ -138,6 +138,10 @@ class MtprotoClient:
         # limited within minutes of a busy short-name search. The pace is
         # shared across the user-session pool.
         self._user_limiter = RateLimiter(min_interval=settings.request_delay)
+        # fragment.* lookups (collectible verdicts, appraise) are MTProto calls
+        # too. They used to run unpaced on the MAIN session - hammering an
+        # already-flood-limited account and extending its cooldown.
+        self._fragment_limiter = RateLimiter(min_interval=settings.request_delay)
 
     @property
     def configured(self) -> bool:
@@ -168,6 +172,17 @@ class MtprotoClient:
             if entry["ready"] and entry["cooldown_until"] <= now
         )
         return max(count, 1)
+
+    @property
+    def call_interval(self) -> float:
+        """Seconds between authoritative calls, shared across the live pool.
+
+        ``request_delay`` is the per-account safe rate (3.0s == 20/min); the
+        pool divides it, and a 1.5x margin keeps live sessions away from the
+        escalation threshold - running the bare 20/min got fresh bot accounts
+        FloodWaited under real multi-user load.
+        """
+        return max(0.35, settings.request_delay * 1.5 / max(1, self.bot_session_count))
 
     @property
     def user_ready(self) -> bool:
@@ -504,15 +519,10 @@ class MtprotoClient:
         )
         return min(waits) if waits else None
 
-    async def resolve_username(self, username: str) -> MtprotoResult:
-        """Resolve a username across the whole session pool.
+    def _pool_candidates(self) -> list[tuple[str, Any]]:
+        """Live sessions in rotation order: main first, then extras.
 
-        The main session is tried first, then the extra bot sessions in
-        rotation. A session that answers ``FloodWait`` is parked for the
-        requested window and the next one takes the call, so a rate-limited
-        account never stalls the pool. Only when **every** session is parked
-        does the caller see a ``flood`` result (with the soonest recovery
-        time), and a generic failure on all sessions reports ``error``.
+        FloodWait-parked sessions are skipped - they cannot serve a call.
         """
         candidates: list[tuple[str, Any]] = []
         now = asyncio.get_event_loop().time()
@@ -528,6 +538,19 @@ class MtprotoClient:
             self._bot_turn += 1
             ordered = ready[turn:] + ready[:turn]
             candidates.extend((entry["name"], entry["client"]) for entry in ordered)
+        return candidates
+
+    async def resolve_username(self, username: str) -> MtprotoResult:
+        """Resolve a username across the whole session pool.
+
+        The main session is tried first, then the extra bot sessions in
+        rotation. A session that answers ``FloodWait`` is parked for the
+        requested window and the next one takes the call, so a rate-limited
+        account never stalls the pool. Only when **every** session is parked
+        does the caller see a ``flood`` result (with the soonest recovery
+        time), and a generic failure on all sessions reports ``error``.
+        """
+        candidates = self._pool_candidates()
 
         if not candidates:
             wait = self._soonest_recovery()
@@ -588,36 +611,58 @@ class MtprotoClient:
         This is Telegram's own API for collectible usernames - no scraping, no
         guessing. Returns ``None`` when the session is unavailable or when
         Telegram reports that the username is not collectible.
+
+        Like resolves, the call rotates across the session pool and is paced:
+        unpaced fragment lookups used to hammer the main session - including
+        one already FloodWait-limited, which only extended its cooldown.
         """
-        if not self._ready or self._client is None:
+        candidates = self._pool_candidates()
+        if not candidates:
             return None
 
-        async with self._lock:
+        self._fragment_limiter.min_interval = self.call_interval
+        for name, client in candidates:
             try:
-                info = await self._client(
+                await self._fragment_limiter.acquire()
+                info = await client(
                     GetCollectibleInfoRequest(
                         collectible=InputCollectibleUsername(username=username)
                     )
                 )
             except FloodWaitError as exc:  # pragma: no cover - network dependent
-                logger.warning("fragment flood wait %ss", exc.seconds)
-                return None
+                self._park(name, float(getattr(exc, "seconds", 60) or 60))
+                logger.warning(
+                    "fragment lookup: session %s flood wait %ss - parked",
+                    name, int(getattr(exc, "seconds", 60) or 60),
+                )
+                continue
             except Exception as exc:
+                cls = type(exc).__name__
+                if "FloodWait" in cls:
+                    wait = float(getattr(exc, "seconds", 60) or 60)
+                    self._park(name, wait)
+                    logger.warning(
+                        "fragment lookup: session %s flood wait %ss - parked",
+                        name, int(wait),
+                    )
+                    continue
                 logger.debug("collectible_info(%s) unavailable: %s", username, exc)
                 return None
 
-        # amount is in the smallest unit of the currency (100 = 1.00 USD),
-        # crypto_amount is in nanoTON (1e9 = 1 TON).
-        fiat = getattr(info, "amount", None)
-        crypto = getattr(info, "crypto_amount", None)
-        return MtprotoCollectible(
-            url=getattr(info, "url", "") or "",
-            purchase_date=getattr(info, "purchase_date", None),
-            fiat_currency=getattr(info, "currency", None) or None,
-            fiat_amount=(fiat / 100) if isinstance(fiat, int) else None,
-            crypto_currency=getattr(info, "crypto_currency", None) or None,
-            crypto_amount=(crypto / 1_000_000_000) if isinstance(crypto, int) else None,
-        )
+            # amount is in the smallest unit of the currency (100 = 1.00 USD),
+            # crypto_amount is in nanoTON (1e9 = 1 TON).
+            fiat = getattr(info, "amount", None)
+            crypto = getattr(info, "crypto_amount", None)
+            return MtprotoCollectible(
+                url=getattr(info, "url", "") or "",
+                purchase_date=getattr(info, "purchase_date", None),
+                fiat_currency=getattr(info, "currency", None) or None,
+                fiat_amount=(fiat / 100) if isinstance(fiat, int) else None,
+                crypto_currency=getattr(info, "crypto_currency", None) or None,
+                crypto_amount=(crypto / 1_000_000_000) if isinstance(crypto, int) else None,
+            )
+
+        return None
 
     @staticmethod
     def _classify(response: Any) -> MtprotoResult:
