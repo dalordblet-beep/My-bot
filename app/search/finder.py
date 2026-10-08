@@ -591,22 +591,36 @@ class UsernameFinder:
             with contextlib.suppress(Exception):
                 progress("stock", 1, state.budget or 1, state.screened)
 
-        basic = await self._checker.confirm_availability(name)
-        state.confirmations += 1
+        # The stored name only has to be shown to be *still* free, and the user
+        # session answers that in one call. The full pipeline would spend a
+        # resolve on the bot pool as well - and wait out its pace - for a
+        # question that does not need it.
+        claimable = await self._checker.reconfirm_claimable(name)
 
-        if basic.status is CheckStatus.RATE_LIMITED:
-            # Cannot re-confirm right now. Give the row back so it is not lost,
-            # and let the normal hunt - which knows how to wait - take over.
-            logger.info("stock: @%s could not be re-confirmed (throttled) - released", name)
-            await self._stock.release(name)
-            return None
-
-        detail = getattr(basic, "detail", None)
-        if basic.status is not CheckStatus.AVAILABLE or detail != "claimability_verified":
-            # Somebody claimed it since the harvest, or the verdict cannot be
-            # proven right now. Either way it is not a name this bot may show.
+        if claimable is True:
+            basic = CheckResult(
+                username=name, status=CheckStatus.AVAILABLE, source="mtproto_user",
+                detail="claimability_verified",
+            )
+        elif claimable is False:
+            # Somebody claimed it since the harvest.
             await self._stock.discard(name)
             return None
+        else:
+            # The user session could not answer, so ask the full pipeline - which
+            # knows how to wait, and which will not invent a verdict either.
+            basic = await self._checker.confirm_availability(name)
+            state.confirmations += 1
+            if basic.status is CheckStatus.RATE_LIMITED:
+                logger.info("stock: @%s could not be re-confirmed (throttled) - released", name)
+                await self._stock.release(name)
+                return None
+            if (
+                basic.status is not CheckStatus.AVAILABLE
+                or getattr(basic, "detail", None) != "claimability_verified"
+            ):
+                await self._stock.discard(name)
+                return None
 
         fragment_clear, fragment_checked = await self._fragment_verdict(name)
         if not fragment_clear:

@@ -168,6 +168,31 @@ async def test_parked_bot_pool_falls_back_to_the_user_session(monkeypatch):
     assert result.detail == "claimability_verified"
 
 
+def test_a_ban_does_not_slow_the_healthy_sessions(monkeypatch):
+    """A long FloodWait is an existing ban, not evidence the pace is too fast.
+
+    The banned session is already out of the pace divisor, so backing the healthy
+    ones off for it punishes them for nothing - and that double penalty is what
+    made every call wait seconds on a pool that could answer perfectly well.
+    """
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", FakeClient(lambda r: _occupied_response()), raising=False)
+    monkeypatch.setattr(client, "_bot_clients", [], raising=False)
+    monkeypatch.setattr(settings, "request_delay", 3.0)
+    client._pace_multiplier = 1.0
+    client._last_flood_at = 0.0
+
+    base = client.call_interval
+
+    client._park("main", 70_000)  # a ~19 hour ban
+    assert client._pace_multiplier == 1.0, "a ban must not slow the pool down"
+    assert client.call_interval == pytest.approx(base)
+
+    client._park("main", 45)  # a short flood - a real pace signal
+    assert client._pace_multiplier > 1.0
+
+
 async def test_a_fully_parked_pool_does_not_freeze_the_check(monkeypatch):
     """Every session parked must not cost the caller the pool's backed-off pace.
 

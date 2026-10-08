@@ -161,6 +161,22 @@ class UsernameChecker:
             )
         return page
 
+    async def reconfirm_claimable(self, username: str) -> bool | None:
+        """One ``account.checkUsername`` call - the cheapest definitive answer.
+
+        For a name the stock already proved claimable, the only open question is
+        whether it is *still* free, and that is exactly what this call answers.
+        Going through the full pipeline instead spent a resolve on the bot pool
+        (and waited out its pace) for a question the user session can answer on
+        its own - which is how delivering one stored name took sixteen seconds.
+
+        ``None`` means the user session could not answer, so the caller falls
+        back to the full pipeline rather than guessing.
+        """
+        if not mtproto_client.user_ready:
+            return None
+        return await mtproto_client.check_username(username)
+
     async def confirm_availability(self, username: str) -> CheckResult:
         """Authoritative resolve - the only channel that can say AVAILABLE.
 

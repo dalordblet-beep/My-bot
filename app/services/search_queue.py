@@ -321,7 +321,11 @@ class SearchQueue:
                 "",
                 f"<code>{bar}</code> <b>{pct}%</b>",
                 f"{spinner} {t(lang, phase_key)}",
-                t(lang, "search.progress_checked", n=confirmations, s=seconds),
+                # "Checked" counts every candidate examined - screening on the public page is
+                # a real check and it is the part that moves - while the
+                # authoritative confirmations are shown as their own number, so
+                # the screen never claims more proof than there is.
+                t(lang, "search.progress_checked", n=screened, c=confirmations, s=seconds),
             ]
         )
 

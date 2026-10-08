@@ -211,6 +211,42 @@ async def test_search_serves_a_stored_name_after_reconfirming_it(bot, monkeypatc
     assert await stock.size() == 0  # it was delivered, not left behind
 
 
+async def test_serving_from_the_stock_costs_one_call(bot, monkeypatch):
+    """Delivering a stored name must not also spend a resolve on the bot pool.
+
+    The name is already proven claimable, so the only open question is whether it
+    is *still* free - and the user session answers exactly that in one call.
+    Running the full pipeline as well is what made a stock delivery take sixteen
+    seconds while the answer was available in three.
+    """
+    monkeypatch.setattr(settings, "name_stock_target", 5)
+    checker = _checker(bot)
+    stock = NameStock(checker, None)
+
+    async with session_scope() as session:
+        await repo.add_free_name(session, "qabux", length=5, has_digits=False, score=60)
+
+    calls = {"cheap": 0, "full": 0}
+
+    async def cheap(name):
+        calls["cheap"] += 1
+        return True
+
+    async def full(name):
+        calls["full"] += 1
+        raise AssertionError("the full pipeline must not run when the cheap call answered")
+
+    monkeypatch.setattr(checker, "reconfirm_claimable", cheap)
+    monkeypatch.setattr(checker, "confirm_availability", full)
+
+    finder = UsernameFinder(checker, None, rng=random.Random(1), stock=stock)
+    attempt = await finder.find_one(SearchCriteria(length=5))
+
+    assert attempt.hit is True
+    assert attempt.username == "qabux"
+    assert calls == {"cheap": 1, "full": 0}
+
+
 async def test_a_stored_name_taken_meanwhile_is_never_delivered(bot, monkeypatch):
     """The central guarantee: a stale entry is thrown away, not handed over.
 

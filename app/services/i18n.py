@@ -432,7 +432,9 @@ EN: dict[str, str] = {
     "search.progress_phase_stock": (
         "{gem} <i>Taking a name we already proved free and re-checking it…</i>"
     ),
-    "search.progress_checked": "{bolt} Checked: <b>{n}</b> · {s}s",
+    "search.progress_checked": (
+        "{bolt} Checked: <b>{n}</b> · confirmed <b>{c}</b> · {s}s"
+    ),
     "search.started": (
         "{search} <b>SEARCH RUNNING</b>\n\n"
         "The result will arrive right here - keep this screen open."
@@ -1313,7 +1315,9 @@ RU: dict[str, str] = {
     "search.progress_phase_stock": (
         "{gem} <i>Беру имя, которое уже доказано свободным, и перепроверяю его…</i>"
     ),
-    "search.progress_checked": "{bolt} Проверено: <b>{n}</b> · {s}с",
+    "search.progress_checked": (
+        "{bolt} Проверено: <b>{n}</b> · подтверждено <b>{c}</b> · {s}с"
+    ),
     "search.started": (
         "{search} <b>ПОИСК ЗАПУЩЕН</b>\n\n"
         "Результат придёт прямо сюда — не отходите от экрана."

@@ -128,6 +128,13 @@ class Settings(BaseSettings):
     # banned - 0.35s is 171/min, ~6x over the escalation threshold.
     request_delay: float = 3.0
     floodwait_safety_margin: int = 3
+    # Seconds between user-only calls (account.checkUsername, the join-request
+    # queue). This is the *final gate* on every delivered name, and bots cannot
+    # call it at all - so it, not the bot pool, is what limits how many verified
+    # names per minute the bot can produce. 0 means "same as REQUEST_DELAY".
+    # Lower it to squeeze more out of one account; the session parks itself on a
+    # FloodWait, so going too far degrades instead of breaking.
+    user_session_delay: float = 0.0
     # How long a single search may spend *waiting out* Telegram throttling
     # before it gives up and says so. A throttle is waited out rather than
     # reported, because "Telegram is limiting us" is not a result - but a search
@@ -206,6 +213,11 @@ class Settings(BaseSettings):
         if not isinstance(parsed, dict):
             return {}
         return {str(k): str(v) for k, v in parsed.items() if str(v).strip()}
+
+    @property
+    def user_call_delay(self) -> float:
+        """Pace for the user-only calls, falling back to the general delay."""
+        return float(self.user_session_delay) if self.user_session_delay > 0 else self.request_delay
 
     @property
     def mtproto_configured(self) -> bool:

@@ -30,10 +30,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _PACE_DECAY_SECONDS = 600.0
 _PACE_MULTIPLIER_CAP = 16.0
 _PACE_BASE_MARGIN = 2.0
-# An absolute ceiling on the shared interval. Without it, a fully parked pool
-# (divisor 1) combined with the 16x backoff produced a 96-second wait between
-# calls - so a search that could still be answered by the user session sat there
-# doing two checks in five minutes. Slowing down must never look like a hang.
+# Only a *short* FloodWait is evidence that the pace is too fast. A long one is
+# an existing ban: the session is already excluded from the pace divisor, and
+# slowing the healthy sessions down for it punishes them for nothing. Without
+# this split a startup ban pushed the multiplier to 16 and every call waited
+# seconds for no reason at all.
+_PACE_SIGNAL_SECONDS = 900.0
+# An absolute ceiling on the shared interval. Slowing down must never look like
+# a hang.
 _INTERVAL_CAP = 20.0
 
 # How many pending join requests to read in one page when checking whether a
@@ -602,7 +606,7 @@ class MtprotoClient:
         # The safe per-account rate divided by the number of live sessions:
         # one session carries the whole pace, N sessions share it.
         self._user_limiter.min_interval = max(
-            1.0, settings.request_delay / len(ready)
+            1.0, settings.user_call_delay / len(ready)
         )
 
         now = asyncio.get_event_loop().time()
@@ -656,7 +660,7 @@ class MtprotoClient:
 
         # The user-only calls share one safe pace across the pool.
         self._user_limiter.min_interval = max(
-            1.0, settings.request_delay / len(ready)
+            1.0, settings.user_call_delay / len(ready)
         )
 
         now = asyncio.get_event_loop().time()
@@ -722,8 +726,18 @@ class MtprotoClient:
                 if entry["name"] == name:
                     entry["cooldown_until"] = until
                     break
-        # Every flood is a signal the load is hot: back the whole pool off.
-        self._register_flood()
+        # A short flood is a signal the load is hot: back the whole pool off.
+        # A long one is a ban that was already in place - the session is out of
+        # the divisor either way, so slowing the *healthy* sessions down for it
+        # only makes the bot look broken.
+        if wait <= _PACE_SIGNAL_SECONDS:
+            self._register_flood()
+        else:
+            logger.warning(
+                "session %s is banned for %.0fs (~%.1fh) - parked, and the pace "
+                "of the healthy sessions is left alone",
+                name, wait, wait / 3600.0,
+            )
 
         # A fully parked pool is worth shouting about exactly once: searches keep
         # working on the user session, but much more slowly, and the operator
