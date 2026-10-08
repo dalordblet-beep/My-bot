@@ -610,11 +610,18 @@ class UsernameFinder:
                         state, progress,
                         (state.confirmations, budget, state.screened),
                     ):
+                        # Waiting stopped helping - every session is parked for
+                        # longer than this search may ever last. Do NOT report the
+                        # throttle: the public pages need no session, so hand the
+                        # run over to them and answer with a real name instead of
+                        # "Telegram is limiting us".
                         logger.warning(
-                            "search stopped after %d candidates: telegram still "
-                            "throttling after the wait budget",
-                            state.screened,
+                            "search: telegram still throttling after the wait "
+                            "budget - switching to the public path",
                         )
+                        public = await self._public_fallback(state, progress)
+                        if public is not None:
+                            return public
                         return FindAttempt(
                             username="",
                             premium=state.best_premium or premium_rating(""),
@@ -782,11 +789,21 @@ class UsernameFinder:
         plainly that the verdict came from public sources rather than Telegram.
         A name it cannot settle is reported as "everything taken" with the best
         candidate named - never dressed up as free.
+
+        The final verdict is the ``guarantee`` stream (clean coinages), not the
+        real-word stream: real words need the authoritative channel to be judged
+        at all - they are almost all taken, and t.me cannot tell that apart from
+        a name it will not hand over - so on the public path they would burn the
+        screen for nothing. The coinage stream is exactly the space where a free
+        name lives, which is what makes this path both fast and useful.
         """
         screen_cap = UNLIMITED_SCREEN_CAP if runtime.unlimited_search else SCREEN_CAP
         best: str | None = None
         best_premium: Premium | None = None
         screened = 0
+        # Mirror the count onto the shared state: a public-only run still examined
+        # real names, and the result screen reports that number.
+        state.screened = 0
 
         stream = self._guarantee_candidates(criteria)
         while screened < screen_cap:
@@ -798,37 +815,61 @@ class UsernameFinder:
             if not batch:
                 break
 
-            survivors: list[str] = []
-            for name in batch:
+            # Judge the whole batch at once. Each name costs two public GETs and
+            # no quota, so the only thing that limits the public path is latency -
+            # and fetching serially turned a wide search into a multi-minute
+            # wait. Running the batch concurrently makes the run behave like the
+            # session path it replaces.
+            verdicts = await asyncio.gather(
+                *(public_verdict_client.judge(n) for n in batch),
+                return_exceptions=True,
+            )
+
+            free_hits: list[tuple[str, PublicVerdict]] = []
+            for name, verdict in zip(batch, verdicts):
                 premium = premium_rating(letter_part(name))
                 if best_premium is None or premium.total > best_premium.total:
                     best, best_premium = name, premium
-                verdict = await public_verdict_client.judge(name)
-                if verdict.status == "occupied":
-                    continue  # ruled out for free
-                survivors.append(name)
+                if isinstance(verdict, Exception):
+                    # A failed public fetch is not a verdict - it simply did not
+                    # settle this name. It is still one name examined.
+                    continue
                 if verdict.status == "free":
-                    # A name with no trace on either public page. This is the
-                    # answer - the only shape the public path can prove.
-                    logger.info("public-only search found @%s (no public trace)", name)
-                    basic = CheckResult(
-                        username=name, status=CheckStatus.AVAILABLE,
-                        source="public_verdict", detail="claimability_unverified",
-                    )
-                    attempt = await self._hit_attempt(
-                        name, basic, state, fragment_clear=True, fragment_checked=True
-                    )
-                    attempt.public_confidence = verdict.confidence
-                    attempt.public_reason = verdict.reason
-                    return attempt
+                    free_hits.append((name, verdict))
             screened += len(batch)
+            state.screened = screened
+
+            if free_hits:
+                # Prefer the best-looking of the free names found in this batch,
+                # so the answer is the nicest one available rather than whichever
+                # happened to be first in the batch.
+                name, verdict = max(
+                    free_hits, key=lambda item: premium_rating(letter_part(item[0])).total
+                )
+                logger.info("public-only search found @%s (no public trace)", name)
+                basic = CheckResult(
+                    username=name, status=CheckStatus.AVAILABLE,
+                    source="public_verdict", detail="claimability_unverified",
+                )
+                attempt = await self._hit_attempt(
+                    name, basic, state, fragment_clear=True, fragment_checked=True
+                )
+                attempt.public_confidence = verdict.confidence
+                attempt.public_reason = verdict.reason
+                return attempt
+
             if progress is not None:
                 with contextlib.suppress(Exception):
                     progress("public", screened, screen_cap, screened)
 
         if best is not None:
+            # Everything the public pages could see was taken. Say exactly that,
+            # and say it came from public sources - the same honest verdict the
+            # session path gives, just reached without a session. ``username``
+            # stays empty on a miss: this project never hands back a name it
+            # cannot stand behind, not even as a "best effort".
             return FindAttempt(
-                username=best,
+                username="",
                 premium=best_premium or premium_rating(""),
                 hit=False,
                 reason="all_taken",
@@ -889,6 +930,17 @@ class UsernameFinder:
         paused = spend_flood_window(self._checker.limiter, MAX_SEARCHABLE_FLOOD_WAIT)
         if paused:
             logger.warning("telegram flood wait %.0fs outstanding - public path", paused)
+            return await self._public_only_search(criteria, progress, state)
+
+        # The pool may not be *parked yet* but already know the next recovery is
+        # further away than this search may ever last. Waiting that out is not a
+        # search, it is a frozen screen - so go to the public path immediately
+        # instead of burning the waiting budget on a recovery that cannot land.
+        recovery = mtproto_client.flood_recovery_seconds
+        if recovery and recovery > ABSOLUTE_SEARCH_SECONDS:
+            logger.warning(
+                "pool recovery is %.0fs away - public path now", recovery
+            )
             return await self._public_only_search(criteria, progress, state)
 
         # The claimability gate is the line between "nobody owns it" and
@@ -967,6 +1019,15 @@ class UsernameFinder:
                 reason="claim_unavailable", generated_tries=state.screened,
             )
 
+        # Nothing free within the budget. Before reporting "everything is taken"
+        # or "verification did not work", give the run one last look through the
+        # public pages: if the MTProto channel refused or never answered, the
+        # public path can still settle the best candidate honestly.
+        if state.unknown_seen or state.occupied_seen:
+            public = await self._public_fallback(state, progress)
+            if public is not None:
+                return public
+
         # Nothing free within the budget. Report honestly why the search stopped
         # - and never present an occupied name as a successful result.
         #
@@ -1004,6 +1065,58 @@ class UsernameFinder:
         )
 
     # ------------------------------------------------------------------ variants
+    async def _public_variants(self, criteria: SearchCriteria, base: str) -> FindAttempt:
+        """The "find similar" shortlist, built without any session.
+
+        Same seed family as the session run, but every candidate is judged on the
+        public pages (``t.me`` + ``fragment.com``), so a parked pool no longer
+        turns this screen into a throttle notice. Only names both pages show no
+        trace of are offered, and they carry the public label.
+        """
+        candidates = [
+            name for name in beautiful_candidates(
+                seed=base, length=None, allow_digits=True, min_score=0,
+                rng=self._rng, limit=MAX_GENERATION_TRIES, include_coinages=False,
+            ) if name != base
+        ]
+        screen_limit = min(len(candidates), VARIANT_SCREEN_CAP)
+        free: list[FindAttempt] = []
+
+        for start in range(0, screen_limit, VARIANT_SCREEN_BATCH):
+            if len(free) >= VARIANTS_CAP:
+                break
+            batch = candidates[start:min(start + VARIANT_SCREEN_BATCH, screen_limit)]
+            verdicts = await asyncio.gather(
+                *(public_verdict_client.judge(n) for n in batch),
+                return_exceptions=True,
+            )
+            for name, verdict in zip(batch, verdicts):
+                if isinstance(verdict, Exception) or verdict.status != "free":
+                    continue
+                basic = CheckResult(
+                    username=name, status=CheckStatus.AVAILABLE,
+                    source="public_verdict", detail="claimability_unverified",
+                )
+                free.append(
+                    FindAttempt(
+                        username=name,
+                        premium=premium_rating(letter_part(name)),
+                        hit=True,
+                        reason="free_found",
+                        basic=basic,
+                        value=await self._price(name),
+                        fragment_clear=True,
+                        fragment_checked=True,
+                        public_confidence=verdict.confidence,
+                        public_reason=verdict.reason,
+                    )
+                )
+
+        return FindAttempt(
+            username="", premium=premium_rating(base), hit=False, reason="variants",
+            seed=base, variants=free, generated_tries=screen_limit,
+        )
+
     async def _find_variants(self, criteria: SearchCriteria) -> FindAttempt:
         """Free alternatives to a name the user cannot have.
 
@@ -1024,15 +1137,17 @@ class UsernameFinder:
                 reason="variants_invalid", seed=base or seed,
             )
 
-        # If Telegram has already thrown a long FloodWait at us, a variants run
-        # cannot be carried out right now - say so instead of hanging.
+        # If Telegram has already thrown a long FloodWait at us, a *session*
+        # variants run cannot be carried out right now - but the public pages
+        # need no session, so the shortlist is still built from them instead of
+        # the run ending with a throttle notice.
         paused = spend_flood_window(self._checker.limiter, MAX_SEARCHABLE_FLOOD_WAIT)
-        if paused:
-            logger.warning("variants aborted: telegram flood wait %.0fs outstanding", paused)
-            return FindAttempt(
-                username="", premium=premium_rating(base), hit=False,
-                reason="throttled", seed=base,
+        if paused or not mtproto_client.user_ready:
+            logger.warning(
+                "variants: no usable session (flood wait %.0fs) - public path",
+                paused or 0.0,
             )
+            return await self._public_variants(criteria, base)
 
         # The seed family, excluding the seed itself (it is the thing they want
         # but cannot have, so it is useless in the shortlist). Coinages are left
@@ -1048,7 +1163,6 @@ class UsernameFinder:
         screened = 0
         confirmations = 0
         screen_limit = min(len(candidates), VARIANT_SCREEN_CAP)
-        throttled = False
         # A variants run shares the same waiting rules as a free search: the
         # throttle is waited out and the working clock extended, bounded by the
         # absolute ceiling. A minimal state carries those two clocks.
@@ -1073,13 +1187,15 @@ class UsernameFinder:
                     # turned into a dead end. Anything already in ``free`` stays
                     # authoritative and safe to return either way.
                     if not await self._wait_out_flood(vstate):
+                        # Waiting stopped helping - finish the shortlist from the
+                        # public pages rather than ending on a throttle notice.
                         logger.warning(
-                            "variants stopped after %d confirmations: telegram "
-                            "still throttling after the wait budget",
-                            confirmations,
+                            "variants: telegram still throttling after the wait "
+                            "budget - completing from public pages",
                         )
-                        throttled = True
-                        break
+                        public = await self._public_variants(criteria, base)
+                        public.variants = list(free) + list(public.variants or [])
+                        return public
                     continue  # retry this name, not the next one
                 confirmations += 1
                 index += 1
@@ -1104,8 +1220,6 @@ class UsernameFinder:
                             fragment_checked=fragment_checked,
                         )
                     )
-            if throttled:
-                break
 
         return FindAttempt(
             username="", premium=premium_rating(base), hit=False, reason="variants",

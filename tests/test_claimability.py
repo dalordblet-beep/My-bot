@@ -279,4 +279,53 @@ async def test_result_screen_carries_the_caveat():
     assert "not verified" in body.lower()
 
 
+async def test_result_screen_says_when_the_verdict_is_from_public_sources():
+    """A public-path hit must be labelled as such, never as Telegram's own word."""
+    from app.bot import texts
+    from app.search.pattern import premium_rating
+
+    class _Attempt:
+        username = "vudote"
+        premium = premium_rating("vudote")
+        hit = True
+        reason = "free_found"
+        basic = _available("vudote", "claimability_unverified")
+        value = None
+        generated_tries = 10
+        seed = None
+        variants = None
+        fragment_clear = True
+        fragment_checked = True
+        public_confidence = "public"
+        public_reason = "no_public_trace_anywhere"
+
+    body = texts._find_result_body("en", _Attempt(), 1)
+    assert "public" in body.lower()
+    assert "vudote" in body
+
+
+async def test_result_screen_says_when_a_public_miss_was_reached_publicly():
+    """An "all taken" verdict from the public path must say how it was reached."""
+    from app.bot import texts
+    from app.search.pattern import premium_rating
+
+    class _Attempt:
+        username = ""
+        premium = premium_rating("")
+        hit = False
+        reason = "all_taken"
+        basic = None
+        value = None
+        generated_tries = 40
+        seed = None
+        variants = None
+        fragment_clear = False
+        fragment_checked = False
+        public_confidence = "public"
+        public_reason = "no_public_trace_anywhere"
+
+    body = texts._find_result_body("en", _Attempt(), 1)
+    assert "public" in body.lower()
+
+
 from app.config import settings as settings_  # noqa: E402  (used via alias above)

@@ -29,6 +29,13 @@ def no_rate_limit(monkeypatch):
     monkeypatch.setattr(uc_module.shared_rate_limiter, "min_interval", 0.0)
 
 
+async def _failing_judge(self, username):
+    """A public path that cannot settle anything (no network in tests)."""
+    from app.telegram.public_verdict import PublicVerdict
+
+    return PublicVerdict("unknown", "fragment_inconclusive", confidence="none")
+
+
 # --------------------------------------------------------------------------- masks
 def test_mask_compiles_to_an_anchored_pattern():
     compiled = compile_mask("??ged")
@@ -543,8 +550,14 @@ async def test_finder_waits_out_a_throttle_instead_of_giving_up(bot, monkeypatch
 
 
 async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, monkeypatch):
-    """The honest last resort, for the case where Telegram refuses for longer
-    than a search may last. It must stay reachable - but only as a last resort."""
+    """The honest last resort, kept for the truly hopeless case.
+
+    Waiting out a throttle *extends* the working budget (waiting is not work), so
+    a permanently flooded search is stopped by the absolute ceiling. Even then it
+    does not give up: it hands the run to the public path. Only when the public
+    pages cannot settle the best candidate either does it fall back to the bare
+    throttle notice - and that is the only case this test reaches.
+    """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult
@@ -556,6 +569,11 @@ async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, mon
     # absolute ceiling. Shrink both so the test does not actually sleep.
     monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
     monkeypatch.setattr(finder_module, "ABSOLUTE_SEARCH_SECONDS", 0.05)
+    # The public path is also dead here (no way to settle the name), which is the
+    # precondition for the throttle notice to be the final word.
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", _failing_judge
+    )
 
     async def always_limited(name):
         return CheckResult(
@@ -574,6 +592,54 @@ async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, mon
     assert attempt.username == ""
     assert attempt.hit is False
     assert attempt.generated_tries > 1, "the search gave up without trying"
+
+
+async def test_a_dead_session_falls_back_to_public_pages_instead_of_giving_up(
+    bot, monkeypatch
+):
+    """The regression behind "stopped after 10 checks": a thrice-failed search
+    must hand over to the public path, not answer with the throttle notice.
+
+    A search could spend its whole wait budget on a parked pool and then report
+    "Telegram is limiting this account" - the exact message the user kept seeing.
+    The public pages need no session, so the run now continues there and returns
+    a real, honestly-labelled verdict.
+    """
+    from app.search import finder as finder_module
+    from app.telegram.public_verdict import PublicVerdict
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
+    monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
+    monkeypatch.setattr(finder_module, "ABSOLUTE_SEARCH_SECONDS", 0.05)
+
+    async def always_limited(name):
+        return CheckResult(
+            username=name, status=CheckStatus.RATE_LIMITED,
+            source="mtproto", reason="flood_wait",
+        )
+
+    async def public_free(self, username):
+        return PublicVerdict("free", "no_public_trace_anywhere")
+
+    checker.confirm_availability = always_limited
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", public_free
+    )
+    finder = UsernameFinder(checker, None)
+
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=7)), timeout=5
+    )
+
+    # Not a throttle notice: a real name, labelled as a public verdict.
+    assert attempt.reason == "free_found"
+    assert attempt.hit is True
+    assert attempt.username
+    assert attempt.public_confidence == "public"
+    assert attempt.basic.source == "public_verdict"
 
 
 async def test_throttle_wait_extends_the_working_budget(bot, monkeypatch):

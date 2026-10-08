@@ -130,6 +130,32 @@ def page_probe() -> FakePageProbe:
     return FakePageProbe(state="free")
 
 
+@pytest.fixture(autouse=True)
+def no_public_network(request, monkeypatch):
+    """The session-free public classifier must never reach the network in tests.
+
+    It is a live HTTP call (``t.me`` + ``fragment.com``), which would make every
+    search test slow, flaky and dependent on the outside world - exactly what
+    ``FakePageProbe`` exists to prevent for the older screen. The whole class is
+    stubbed so any code path that reaches it gets the honest "could not settle
+    it" verdict. The classifier's own test module is skipped: it builds its own
+    offline client against canned pages and must judge for real.
+    """
+    from app.telegram.public_verdict import PublicVerdict
+
+    if request.node.fspath.basename == "test_public_verdict.py":
+        yield
+        return
+
+    async def offline_judge(self, username):
+        return PublicVerdict("unknown", "fragment_inconclusive", confidence="none")
+
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", offline_judge
+    )
+    yield
+
+
 @pytest_asyncio.fixture(scope="session")
 async def checker(bot, cache, page_probe):
     return UsernameChecker(cache=cache, bot=bot, page_probe=page_probe)
