@@ -136,6 +136,13 @@ MAX_SEARCHABLE_FLOOD_WAIT = 90.0
 # name, not for an explanation - but a search cannot sit there indefinitely.
 # Tunable from the environment (MAX_SEARCH_SECONDS).
 MAX_SEARCH_SECONDS = settings.max_search_seconds
+# The true ceiling on a search, waiting included. ``MAX_SEARCH_SECONDS`` bounds
+# only the *working* time (screening + confirmations) and is extended by each
+# flood wait, because waiting out a throttle is not work the search did. This
+# second limit is what eventually answers a user whose pool is flooded for
+# hours: generous enough to let a real flood recovery land inside one search,
+# hard enough that the screen never becomes a permanent "SEARCHING...".
+ABSOLUTE_SEARCH_SECONDS = settings.absolute_search_seconds
 # Pause used when Telegram reports a flood but no session recovery time is
 # known (nothing is parked, so the limit came from somewhere else).
 FLOOD_RETRY_PAUSE = 5.0
@@ -179,6 +186,12 @@ class _SweepState:
     # sweeps and the flood wait agree on one budget instead of three.
     budget: int = 0
     deadline: float = 0.0
+    # An absolute wall clock that waiting *cannot* push back. ``deadline`` is
+    # the working budget and is extended by every flood wait (waiting is not
+    # work), so without a second, hard ceiling a pool that floods forever would
+    # keep a search on screen indefinitely. This one is the true "the user must
+    # be answered now" limit.
+    absolute_deadline: float = 0.0
     # A name that resolves as unoccupied but whose claimability could not be
     # verified (no user session, or its checkUsername was rate-limited). It is
     # never delivered as a result - if the hunt ends with only these, the run
@@ -368,14 +381,14 @@ class UsernameFinder:
 
     async def _wait_out_flood(
         self,
-        deadline: float,
+        state: "_SweepState",
         progress=None,
         snapshot: tuple[int, int, int] | None = None,
     ) -> bool:
         """Hold on until the throttled session pool comes back.
 
         ``True`` = waited, carry on. ``False`` = waiting is pointless (the
-        recovery is further away than this search is allowed to last).
+        recovery is further away than this search may *ever* last).
 
         A FloodWait used to end the search with "Telegram is limiting us" - the
         one answer the product must not give, because it is not a result, it is
@@ -383,6 +396,11 @@ class UsernameFinder:
         *spent* rather than reported: the screen switches to the "waiting" phase
         and keeps breathing, and the very same name is asked about again the
         moment the pool is back.
+
+        The wait also **extends the working deadline** (up to the absolute
+        ceiling): time parked on a throttle is time the search did not get to
+        spend on its budget, so charging it against ``MAX_SEARCH_SECONDS`` was
+        what ended a 120-confirmation "unlimited" run after a dozen checks.
         """
         now = asyncio.get_event_loop().time()
         wait = mtproto_client.flood_recovery_seconds
@@ -390,8 +408,13 @@ class UsernameFinder:
             # Nothing is parked, yet the check came back limited - wait one
             # short beat and retry rather than spinning on the same call.
             wait = FLOOD_RETRY_PAUSE
-        if now + wait > deadline:
-            return False
+        if now + wait > state.deadline:
+            # The working budget cannot absorb this wait, so push it out by the
+            # wait itself (waiting is not work) - but never past the hard
+            # ceiling, which is the one limit a flooded pool cannot extend.
+            if now + wait > state.absolute_deadline:
+                return False
+            state.deadline = now + wait
         if progress is not None and snapshot is not None:
             with contextlib.suppress(Exception):
                 progress("waiting", snapshot[0], snapshot[1], snapshot[2])
@@ -513,7 +536,7 @@ class UsernameFinder:
                     # back and then ask about the very same name again. The
                     # search only stops when waiting itself stops making sense.
                     if not await self._wait_out_flood(
-                        state.deadline, progress,
+                        state, progress,
                         (state.confirmations, budget, state.screened),
                     ):
                         logger.warning(
@@ -739,8 +762,17 @@ class UsernameFinder:
 
         budget = self._confirm_budget(criteria)
         state.budget = budget
-        state.deadline = asyncio.get_event_loop().time() + (
+        now = asyncio.get_event_loop().time()
+        state.deadline = now + (
             MAX_SEARCH_SECONDS if max_seconds is None else max(0.0, max_seconds)
+        )
+        # The hard ceiling is never shortened by ``max_seconds``: background
+        # callers pass a short working budget precisely so they cannot hold the
+        # scarce quota while a user waits, and extending that into a long
+        # absolute limit would defeat the point.
+        state.absolute_deadline = now + (
+            ABSOLUTE_SEARCH_SECONDS if max_seconds is None
+            else max(0.0, max_seconds) + ABSOLUTE_SEARCH_SECONDS
         )
 
         # A name already proven free is the cheapest and most certain answer
@@ -874,7 +906,13 @@ class UsernameFinder:
         confirmations = 0
         screen_limit = min(len(candidates), VARIANT_SCREEN_CAP)
         throttled = False
-        deadline = asyncio.get_event_loop().time() + MAX_SEARCH_SECONDS
+        # A variants run shares the same waiting rules as a free search: the
+        # throttle is waited out and the working clock extended, bounded by the
+        # absolute ceiling. A minimal state carries those two clocks.
+        vstate = _SweepState()
+        now = asyncio.get_event_loop().time()
+        vstate.deadline = now + MAX_SEARCH_SECONDS
+        vstate.absolute_deadline = now + ABSOLUTE_SEARCH_SECONDS
         for start in range(0, screen_limit, VARIANT_SCREEN_BATCH):
             if len(free) >= VARIANTS_CAP or confirmations >= VARIANT_CONFIRM_BUDGET:
                 break
@@ -891,7 +929,7 @@ class UsernameFinder:
                     # Same rule as a free search: a throttle is waited out, not
                     # turned into a dead end. Anything already in ``free`` stays
                     # authoritative and safe to return either way.
-                    if not await self._wait_out_flood(deadline):
+                    if not await self._wait_out_flood(vstate):
                         logger.warning(
                             "variants stopped after %d confirmations: telegram "
                             "still throttling after the wait budget",

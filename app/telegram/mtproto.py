@@ -25,11 +25,23 @@ logger = get_logger(__name__)
 # session file the operator uploads next to the code.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-# Adaptive pool pacing: every FloodWait doubles the interval multiplier
+# Adaptive pool pacing: every FloodWait nudges the interval multiplier up
 # (capped), and this many flood-free seconds reset it back to full speed.
+#
+# The cap used to be 16x, which is what made an "unlimited" search impossible:
+# with seven live sessions the base interval is ~0.86s, but a single FloodWait
+# pushed the pool to 13.7s per call, so the 120-confirmation budget could never
+# be spent inside MAX_SEARCH_SECONDS - the run always ended early with the
+# "Telegram is limiting this account" screen. The multiplier still exists (a
+# flooded pool really is a signal to ease off), but it can no longer turn a
+# fast pool into a frozen one: the ceiling is deliberately low.
 _PACE_DECAY_SECONDS = 600.0
-_PACE_MULTIPLIER_CAP = 16.0
+_PACE_MULTIPLIER_CAP = 2.0
 _PACE_BASE_MARGIN = 2.0
+# The multiplier is a *whole-pool* brake, so it must never be triggered by a
+# long ban: that session is already excluded from the divisor, and slowing the
+# healthy sessions down for it only punishes them for nothing. Only a short
+# FloodWait (below this) is read as "the pace is too hot".
 # Only a *short* FloodWait is evidence that the pace is too fast. A long one is
 # an existing ban: the session is already excluded from the pace divisor, and
 # slowing the healthy sessions down for it punishes them for nothing. Without
@@ -244,12 +256,12 @@ class MtprotoClient:
         ``request_delay`` is the per-account safe rate; the pool divides it and
         a safety margin keeps live sessions away from the escalation threshold.
         Fresh bot accounts carry a much smaller quota than seasoned ones, so on
-        top of the base margin the pace is **adaptive**: every FloodWait doubles
-        the multiplier (capped), and ten flood-free minutes reset it - the pool
-        slows itself down until Telegram stops complaining, then speeds back.
-
-        The result is capped: a big backoff is meant to be cautious, not to make
-        a search look frozen.
+        top of the base margin the pace is **adaptive**: a short FloodWait
+        nudges the multiplier up (capped low), and ten flood-free minutes reset
+        it - the pool eases itself back until Telegram stops complaining, then
+        speeds back up. The cap is deliberately modest: a big backoff is meant
+        to be cautious, never to make a search look frozen or to make an
+        "unlimited" budget unreachable inside the search's own time limit.
         """
         now = asyncio.get_event_loop().time()
         if self._pace_multiplier > 1.0 and now - self._last_flood_at > _PACE_DECAY_SECONDS:
@@ -265,12 +277,12 @@ class MtprotoClient:
         )
 
     def _register_flood(self) -> None:
-        """Back the whole pool off: one account flooding hints the load is hot."""
+        """Back the whole pool off a little: one account flooding hints the load is hot."""
         now = asyncio.get_event_loop().time()
         if now - self._last_flood_at > _PACE_DECAY_SECONDS:
-            self._pace_multiplier = 2.0  # a fresh flood starts a new backoff
+            self._pace_multiplier = 1.5  # a fresh flood starts a new, gentle backoff
         else:
-            self._pace_multiplier = min(self._pace_multiplier * 2.0, _PACE_MULTIPLIER_CAP)
+            self._pace_multiplier = min(self._pace_multiplier * 1.5, _PACE_MULTIPLIER_CAP)
         self._last_flood_at = now
         logger.warning(
             "pool pace backed off: x%.1f (interval %.2fs)",

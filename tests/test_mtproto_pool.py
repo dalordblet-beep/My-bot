@@ -240,11 +240,12 @@ def test_the_backoff_never_looks_like_a_hang(monkeypatch):
     monkeypatch.setattr(client, "_client", None, raising=False)
     monkeypatch.setattr(client, "_bot_clients", [], raising=False)
     monkeypatch.setattr(settings, "request_delay", 3.0)
-    client._pace_multiplier = 16.0
+    client._pace_multiplier = mtproto_module._PACE_MULTIPLIER_CAP
     client._last_flood_at = asyncio.get_event_loop().time()
 
     assert client.resolve_sessions_live == 0
-    # Without the ceiling this was 3.0 * 2.0 * 16 / 1 == 96 seconds.
+    # Even at the capped backoff with only one live session the interval stays
+    # bounded by the ceiling - a cautious pace must never read as a frozen screen.
     assert client.call_interval <= mtproto_module._INTERVAL_CAP
 
 
@@ -424,13 +425,15 @@ def test_flood_backs_the_pool_pace_off_and_it_recovers(monkeypatch):
     base = client.call_interval
     assert base == pytest.approx(3.0 * 2.0)
 
-    # A flood doubles the interval; another one doubles it again - up to the
-    # ceiling, which exists so a cautious pace never reads as a frozen screen.
+    # A short flood nudges the interval up; another one nudges it again - up to
+    # the ceiling, which is deliberately low so a cautious pace never reads as a
+    # frozen screen and never makes an "unlimited" budget unreachable inside the
+    # search's own time limit.
     client._park("main", 60)
-    assert client.call_interval == pytest.approx(base * 2)
+    assert client.call_interval == pytest.approx(base * 1.5)
     client._park("main", 60)
     assert client.call_interval == pytest.approx(
-        min(base * 4, mtproto_module._INTERVAL_CAP)
+        min(base * mtproto_module._PACE_MULTIPLIER_CAP, mtproto_module._INTERVAL_CAP)
     )
 
     # Ten flood-free minutes recover the full speed.

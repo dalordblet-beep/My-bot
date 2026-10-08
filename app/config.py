@@ -141,6 +141,15 @@ class Settings(BaseSettings):
     # cannot sit on the screen for ever. Raise it to trade patience for the
     # throttle notice; it is the only knob that still produces that message.
     max_search_seconds: float = 240.0
+    # The true ceiling on a search, waiting included. ``max_search_seconds``
+    # bounds only the *working* time (screening + confirmations) and is extended
+    # by each flood wait, because waiting out a throttle is not work the search
+    # did - otherwise a three-minute park would also eat the whole working
+    # budget and end a "unlimited" search at a handful of checks. This second
+    # limit is the hard stop for a pool that is flooded for hours: large enough
+    # to let a real FloodWait recovery land inside one search, small enough that
+    # the screen never becomes a permanent "SEARCHING...".
+    absolute_search_seconds: float = 900.0
 
     # --- free-name stock --------------------------------------------------
     # The answer to "the bot must produce a free name even when it is busy".

@@ -231,7 +231,11 @@ async def test_variants_give_up_only_when_waiting_stops_helping(bot, monkeypatch
 
     monkeypatch.setattr(settings, "allow_bot_api_availability", True)
     monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
+    # Waiting out a throttle extends the working budget, so only the absolute
+    # ceiling can still stop a permanently flooded variants run. Shrink both so
+    # the test does not actually sleep.
     monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
+    monkeypatch.setattr(finder_module, "ABSOLUTE_SEARCH_SECONDS", 0.05)
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
 
     async def throttled(name):

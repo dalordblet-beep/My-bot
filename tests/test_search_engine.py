@@ -532,8 +532,11 @@ async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, mon
 
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
     monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
-    # A search is not allowed to sit on the throttle for ever.
+    # Waiting out a throttle *extends* the working budget (waiting is not work),
+    # so the only thing that can still stop a permanently flooded search is the
+    # absolute ceiling. Shrink both so the test does not actually sleep.
     monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
+    monkeypatch.setattr(finder_module, "ABSOLUTE_SEARCH_SECONDS", 0.05)
 
     async def always_limited(name):
         return CheckResult(
@@ -552,6 +555,52 @@ async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, mon
     assert attempt.username == ""
     assert attempt.hit is False
     assert attempt.generated_tries > 1, "the search gave up without trying"
+
+
+async def test_throttle_wait_extends_the_working_budget(bot, monkeypatch):
+    """Time parked on a FloodWait must not be charged to the search's budget.
+
+    This is the regression behind "поиск остановлен после 10 проверок": with the
+    old pacing a single flood pushed the pool to 13.7s per call, so the 120
+    confirmations of an "unlimited" budget could never be spent inside
+    MAX_SEARCH_SECONDS and the run always ended on the throttle screen. Waiting
+    is not work: the deadline is pushed out by the wait, up to the absolute
+    ceiling, and the hunt continues until its *real* budget is spent.
+    """
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    # A wait long enough that it always overruns the (tiny) working budget - but
+    # far short of the absolute ceiling, so the search may keep going.
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.05)
+    monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.001)
+
+    seen = 0
+
+    async def throttling_then_free(name):
+        nonlocal seen
+        seen += 1
+        if seen <= 3:
+            return CheckResult(
+                username=name, status=CheckStatus.RATE_LIMITED,
+                source="mtproto", reason="flood_wait",
+            )
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
+
+    checker.confirm_availability = throttling_then_free
+    finder = UsernameFinder(checker, None)
+
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=7)), timeout=5
+    )
+
+    # The working budget alone would have ended the run on the very first
+    # throttle; extending it by the wait is what let it reach the free name.
+    assert attempt.hit is True
+    assert attempt.reason == "free_found"
+    assert seen >= 4
 
 
 async def test_a_hopeless_search_ends_on_time_not_on_the_budget(bot, monkeypatch):
