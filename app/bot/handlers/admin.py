@@ -691,6 +691,15 @@ async def on_setting_value(
             return
         value = await runtime.set(session, key, raw)
         await admin_service.update_bot_setting(session, user, key, str(value))
+        # Customisation settings take effect immediately.
+        if key == "button_theme":
+            from app.bot.keyboards.base import apply_button_theme
+
+            apply_button_theme(runtime.button_theme)
+        elif key == "custom_labels":
+            from app.services.i18n import refresh_custom_labels
+
+            refresh_custom_labels()
         await message.answer(
             t(lang, "admin.setting_saved", key=texts.esc(key), value=texts.esc(value)),
             reply_markup=admin_back_keyboard(lang, cb.ADMIN_SETTINGS),

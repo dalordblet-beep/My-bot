@@ -46,6 +46,7 @@ from app.search.pattern import (
     rate,
 )
 from app.telegram.username_checker import UsernameChecker
+from app.services.runtime_config import runtime
 from app.utils.enums import CheckStatus, CollectibleStatus
 from app.utils.logging_setup import get_logger
 from app.utils.ratelimit import spend_flood_window
@@ -297,9 +298,12 @@ class UsernameFinder:
 
     def _confirm_budget(self, criteria: SearchCriteria) -> int:
         """Total confirmations this search may spend, by name length."""
+        high = runtime.unlimited_search
+        free = 500 if high else FREE_CONFIRM_BUDGET
+        short = 500 if high else SHORT_NAME_CONFIRM_BUDGET
         if criteria.length is not None and criteria.length <= SHORT_NAME_LENGTH:
-            return max(FREE_CONFIRM_BUDGET, SHORT_NAME_CONFIRM_BUDGET)
-        return FREE_CONFIRM_BUDGET
+            return max(free, short)
+        return free
 
     def _guarantee_candidates(self, criteria: SearchCriteria) -> Iterator[str]:
         """The guarantee stream: names that are actually still free.
@@ -479,6 +483,12 @@ class UsernameFinder:
         """
         state = _SweepState()
 
+        # Free, unlimited bot: when enabled the search keeps scanning until it
+        # finds a free name instead of stopping at the original conservative caps.
+        high = runtime.unlimited_search
+        screen_cap = 5000 if high else SCREEN_CAP
+        guarantee_cap = 20000 if high else GUARANTEE_SCREEN_CAP
+
         # If Telegram has already thrown a long FloodWait at us, a search cannot
         # be carried out right now. Say so immediately instead of hanging on the
         # limiter for hours while the user stares at "SEARCHING...".
@@ -493,9 +503,9 @@ class UsernameFinder:
         budget = self._confirm_budget(criteria)
 
         # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
-        valuable_budget = min(VALUABLE_CONFIRM_BUDGET, budget)
+        valuable_budget = min(500 if high else VALUABLE_CONFIRM_BUDGET, budget)
         stopped = await self._sweep(
-            self._candidates(criteria), valuable_budget, state, progress, "valuable"
+            self._candidates(criteria), valuable_budget, state, progress, "valuable", screen_cap
         )
         if stopped is not None:
             return stopped
@@ -507,7 +517,7 @@ class UsernameFinder:
         if state.confirmations < budget:
             stopped = await self._sweep(
                 self._guarantee_candidates(criteria), budget, state, progress,
-                "guarantee", GUARANTEE_SCREEN_CAP,
+                "guarantee", guarantee_cap,
             )
             if stopped is not None:
                 return stopped

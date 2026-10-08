@@ -29,9 +29,42 @@ SUCCESS = ButtonStyle.SUCCESS
 DANGER = ButtonStyle.DANGER
 NEUTRAL = None
 
+# role -> Telegram style; mutable so the admin's theme can recolour everything.
+_STYLE_BY_NAME = {
+    "primary": ButtonStyle.PRIMARY,
+    "success": ButtonStyle.SUCCESS,
+    "danger": ButtonStyle.DANGER,
+    "neutral": None,
+}
+_THEME = {
+    "primary": ButtonStyle.PRIMARY,
+    "success": ButtonStyle.SUCCESS,
+    "danger": ButtonStyle.DANGER,
+    "neutral": None,
+}
+_ROLE_OF = {
+    ButtonStyle.PRIMARY: "primary",
+    ButtonStyle.SUCCESS: "success",
+    ButtonStyle.DANGER: "danger",
+    None: "neutral",
+}
+
+
+def apply_button_theme(theme: dict | None) -> None:
+    """Recolour every button by remapping the three semantic roles.
+
+    ``theme`` is a mapping like ``{"primary": "success"}``; unknown roles or
+    values fall back to the default style for that role.
+    """
+    theme = theme or {}
+    for role in ("primary", "success", "danger", "neutral"):
+        target = str(theme.get(role, role)).lower()
+        _THEME[role] = _STYLE_BY_NAME.get(target, _STYLE_BY_NAME[role])
+
 
 def btn(text: str, *, icon: str | None = None, style: str | None = None, **kwargs) -> InlineKeyboardButton:
     """Build a colour-coded, icon-carrying inline button."""
+    style = _THEME.get(_ROLE_OF.get(style, "neutral"), style)
     custom_id = _e.custom_id(icon) if icon else None
     if custom_id:
         return InlineKeyboardButton(

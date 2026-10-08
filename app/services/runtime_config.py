@@ -10,6 +10,7 @@ memory; :meth:`RuntimeConfig.refresh` reloads them.
 
 from __future__ import annotations
 
+import json
 from typing import Any, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -29,17 +30,44 @@ def _as_str(value: str) -> str:
     return value.strip()
 
 
+def _as_bool(value: str) -> bool:
+    return str(value).strip().lower() in ("1", "true", "yes", "on", "y")
+
+
+def _as_json(value: str) -> dict:
+    """Parse a JSON object; empty input is treated as an empty override."""
+    text = (value or "").strip()
+    if not text:
+        return {}
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        raise ValueError("expected a JSON object")
+    if not isinstance(data, dict):
+        raise ValueError("expected a JSON object")
+    return data
+
+
 # key -> (parser, human label, settings attribute used as fallback)
 OVERRIDABLE: dict[str, tuple[Callable[[str], Any], str, str]] = {
-    "required_channel_id": (_as_int, "Required channel id", "required_channel_id"),
-    "required_channel_username": (_as_str, "Required channel username", "required_channel_username"),
-    "required_channel_invite_url": (_as_str, "Channel invite link", "required_channel_invite_url"),
-    "required_chat_id": (_as_int, "Required chat id", "required_chat_id"),
-    "required_chat_username": (_as_str, "Required chat username", "required_chat_username"),
-    "required_chat_invite_url": (_as_str, "Chat invite link", "required_chat_invite_url"),
+    # --- bot customisation (edited from the admin panel) -----------------
+    "welcome_message": (_as_str, "Welcome message (/start text)", "welcome_message"),
+    "custom_labels": (
+        _as_json,
+        'Button labels JSON, e.g. {"btn.search":"Find names"}',
+        "custom_labels",
+    ),
+    "button_theme": (
+        _as_json,
+        'Button theme JSON, e.g. {"primary":"success"}',
+        "button_theme",
+    ),
+    "unlimited_search": (_as_bool, "Unlimited search attempts (free bot)", "unlimited_search"),
+    # --- required subscriptions (managed via the Subscriptions tab) ------
     "required_subscriptions": (
         _as_str, "Required subscriptions (JSON)", "required_subscriptions"
     ),
+    # --- operational tuning ----------------------------------------------
     "max_search_results": (_as_int, "Max search results", "max_search_results"),
     "cache_ttl": (_as_int, "Cache TTL (s)", "cache_ttl"),
     "captcha_ttl": (_as_int, "CAPTCHA TTL (s)", "captcha_ttl"),
@@ -77,15 +105,28 @@ class RuntimeConfig:
     def get(self, key: str) -> Any:
         if key in self._overrides:
             return self._overrides[key]
-        _, _, attr = OVERRIDABLE[key]
-        return getattr(settings, attr)
+        entry = OVERRIDABLE.get(key)
+        if entry is not None:
+            _, _, attr = entry
+            return getattr(settings, attr)
+        # Keys retired from the admin panel (legacy channel/chat ids) still
+        # resolve from settings so the fallback keeps working.
+        return getattr(settings, key)
+
+    def override(self, key: str) -> Any:
+        """Return the admin-set override for ``key``, or None if unset."""
+        return self._overrides.get(key)
 
     async def set(self, session: AsyncSession, key: str, raw_value: str) -> Any:
         if key not in OVERRIDABLE:
             raise KeyError(f"{key} is not overridable")
         parser = OVERRIDABLE[key][0]
         value = parser(raw_value)
-        await repo.set_bot_setting(session, key, str(value))
+        if isinstance(value, (dict, list)):
+            stored = json.dumps(value, ensure_ascii=False)
+        else:
+            stored = str(value)
+        await repo.set_bot_setting(session, key, stored)
         self._overrides[key] = value
         return value
 
@@ -151,6 +192,44 @@ class RuntimeConfig:
     @property
     def support_username(self) -> str:
         return str(self.get("support_username") or "mogeds2").lstrip("@")
+
+    # ---- bot customisation (admin panel) ---------------------------------
+    @property
+    def welcome_message(self) -> str:
+        return str(self.get("welcome_message") or "").strip()
+
+    @property
+    def custom_labels(self) -> dict:
+        return self._json_value("custom_labels")
+
+    @property
+    def button_theme(self) -> dict:
+        return self._json_value("button_theme")
+
+    @property
+    def unlimited_search(self) -> bool:
+        val = self.get("unlimited_search")
+        if isinstance(val, bool):
+            return val
+        if isinstance(val, str):
+            return val.strip().lower() in ("1", "true", "yes", "on", "y")
+        return bool(val)
+
+    def _json_value(self, key: str) -> dict:
+        """Parse a JSON-object override whether it is stored raw or pre-parsed."""
+        val = self.get(key)
+        if isinstance(val, dict):
+            return val
+        raw = val or ""
+        if not isinstance(raw, str):
+            raw = str(raw)
+        if not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     @property
     def channel_configured(self) -> bool:

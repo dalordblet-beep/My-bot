@@ -108,6 +108,12 @@ async def run() -> None:
 
     async with session_scope() as session:
         await runtime.load(session)
+        # Apply admin-editable bot customisation (button colours, label renames).
+        from app.bot.keyboards.base import apply_button_theme
+        from app.services.i18n import refresh_custom_labels
+
+        apply_button_theme(runtime.button_theme)
+        refresh_custom_labels()
 
     if settings.mtproto_configured:
         ready = await mtproto_client.start()

@@ -83,6 +83,16 @@ class Settings(BaseSettings):
     # an existing .env keeps working without changes.
     required_subscriptions: str = ""
 
+    # --- bot customisation (all edited live from the admin panel) --------
+    # Welcome text shown on /start. Empty = built-in default.
+    welcome_message: str = ""
+    # JSON map of i18n key -> custom text, e.g. {"btn.search": "Find names"}.
+    custom_labels: str = "{}"
+    # JSON map of semantic role -> Telegram style, e.g. {"primary": "success"}.
+    button_theme: str = "{}"
+    # Free, unlimited bot: keep scanning until a free name is found.
+    unlimited_search: bool = True
+
     # --- captcha ----------------------------------------------------------
     captcha_ttl: int = 300
     captcha_verification_ttl: int = 86400

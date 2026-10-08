@@ -12,6 +12,7 @@ from html import escape as _html_escape
 from app.database.models import AdminAction, Search, User
 from app.services.emoji import emoji
 from app.services.i18n import t
+from app.services.runtime_config import runtime
 from app.services.subscriptions import sub_label
 from app.utils.buildinfo import build_stamp
 from app.utils.enums import CheckStatus, CollectibleStatus, Privilege, UsernameType
@@ -182,6 +183,13 @@ def membership_unverified(lang: str) -> str:
 
 def welcome(lang: str, user: User) -> str:
     name = esc(user.first_name or user.username or "friend")
+    custom = runtime.welcome_message
+    if custom:
+        # Admin-authored greeting; supports the {name} placeholder.
+        try:
+            return custom.format(name=name)
+        except (KeyError, IndexError):
+            return custom
     return (
         f"{t(lang, 'welcome.title', name=name)}\n\n"
         f"{t(lang, 'welcome.body')}\n\n"

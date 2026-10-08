@@ -9,9 +9,20 @@ Adding a language = adding one dict. Nothing else changes.
 from __future__ import annotations
 
 from app.services.emoji import PLAIN, emoji as _emoji
+from app.services.runtime_config import runtime
 from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
+
+# Admin-editable button/label overrides, refreshed from runtime on boot and on
+# every edit so t() stays cheap (no JSON parse per call).
+_LABEL_OVERRIDES: dict[str, str] = {}
+
+
+def refresh_custom_labels() -> None:
+    """Pull the admin's label overrides into the fast lookup cache."""
+    global _LABEL_OVERRIDES
+    _LABEL_OVERRIDES = dict(runtime.custom_labels)
 
 # Every template may reference {shield}, {search}, ... without passing them in.
 _EMOJI_CONTEXT: dict[str, str] = {name: _emoji.render(name) for name in PLAIN}
@@ -1772,6 +1783,10 @@ def t(lang: str | None, key: str, **kwargs: object) -> str:
     if template is None:
         logger.warning("missing translation key: %s", key)
         return key
+    # Admin can rename any user-visible key (mostly btn.*) from the panel.
+    custom = _LABEL_OVERRIDES.get(key)
+    if custom:
+        template = custom
     if not kwargs and not _EMOJI_CONTEXT:
         return template
     context = dict(_EMOJI_CONTEXT)

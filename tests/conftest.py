@@ -67,6 +67,9 @@ def patched_settings(db_url):
         "allow_bot_api_availability": False,
         "fragment_enabled": False,
         "membership_recheck_ttl": 300,
+        # Keep the original, conservative scan caps in tests: the live default
+        # is unlimited (free bot), but tests must stay fast and deterministic.
+        "unlimited_search": False,
     }
     for key, value in overrides.items():
         original[key] = getattr(settings, key)
