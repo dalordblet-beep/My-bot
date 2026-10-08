@@ -113,6 +113,12 @@ VALUABLE_CONFIRM_BUDGET = 5
 # the progress screen exists precisely to make that wait bearable.
 SHORT_NAME_LENGTH = 6
 SHORT_NAME_CONFIRM_BUDGET = 30
+# When claimability cannot be verified (no user session, or its checkUsername
+# was rate-limited), an unoccupied name is *not* a provable win. The search
+# keeps hunting for a provable one and delivers the best unverified candidate
+# only after this many more confirmations - never silently, the result screen
+# carries the caveat.
+UNVERIFIED_GRACE = 5
 # If a FloodWait is longer than this, do not sit on it: a search the user is
 # waiting on must answer now and say "Telegram is throttling us", not hang.
 # A multi-minute wait is not a search, it is a stuck screen.
@@ -152,6 +158,12 @@ class _SweepState:
     unknown_seen: int = 0
     best: str | None = None
     best_premium: Premium | None = None
+    # A name that resolves as unoccupied but whose claimability could not be
+    # verified (no user session, or its checkUsername was rate-limited). It is
+    # never allowed to stop the search as a "win" right away - the run keeps
+    # hunting for a provable name and only falls back to this one at the end.
+    unverified_hit: "FindAttempt | None" = None
+    unverified_seen: int = 0
 
 
 @dataclass
@@ -410,17 +422,21 @@ class UsernameFinder:
                         # Listed for auction/sale on Fragment: not claimable.
                         state.occupied_seen += 1
                         continue
-                    return FindAttempt(
-                        username=name,
-                        premium=premium_rating(letter_part(name)),
-                        hit=True,
-                        reason="free_found",
-                        basic=basic,
-                        generated_tries=state.screened,
-                        value={**estimate_value(name), "price": await self._price(name)},
-                        fragment_clear=fragment_clear,
-                        fragment_checked=fragment_checked,
+                    attempt = await self._hit_attempt(
+                        name, basic, state, fragment_clear, fragment_checked
                     )
+                    if getattr(basic, "detail", None) == "claimability_unverified":
+                        # "Nobody owns it" is proven, "Telegram will hand it
+                        # over" is not. Do not stop the run for this - keep
+                        # hunting for a provable name, and only fall back to
+                        # the best unverified candidate when the hunt is over.
+                        if state.unverified_hit is None:
+                            state.unverified_hit = attempt
+                        state.unverified_seen += 1
+                        if state.unverified_seen >= UNVERIFIED_GRACE:
+                            return attempt
+                        continue
+                    return attempt
 
                 if basic.status is CheckStatus.OCCUPIED:
                     state.occupied_seen += 1
@@ -448,6 +464,23 @@ class UsernameFinder:
                     state.unknown_seen += 1
 
         return None
+
+    async def _hit_attempt(
+        self, name: str, basic: CheckResult, state: "_SweepState",
+        fragment_clear: bool, fragment_checked: bool,
+    ) -> FindAttempt:
+        """Build the full result for a confirmed-free name."""
+        return FindAttempt(
+            username=name,
+            premium=premium_rating(letter_part(name)),
+            hit=True,
+            reason="free_found",
+            basic=basic,
+            generated_tries=state.screened,
+            value={**estimate_value(name), "price": await self._price(name)},
+            fragment_clear=fragment_clear,
+            fragment_checked=fragment_checked,
+        )
 
     async def _find_free(
         self, criteria: SearchCriteria, progress=None
@@ -521,6 +554,13 @@ class UsernameFinder:
             )
             if stopped is not None:
                 return stopped
+
+        # Nothing provably free within the budget. If an unverified candidate
+        # was found along the way (claimability could not be checked), it is
+        # still the best answer - delivered with its loud caveat on the result
+        # screen, never dressed up as a guaranteed win.
+        if state.unverified_hit is not None:
+            return state.unverified_hit
 
         # Nothing free within the budget. Report honestly why the search stopped
         # - and never present an occupied name as a successful result.

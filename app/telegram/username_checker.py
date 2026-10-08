@@ -232,10 +232,13 @@ class UsernameChecker:
                             username=name, status=CheckStatus.INVALID,
                             source="mtproto_user", reason="not_assignable",
                         )
-                    return CheckResult(
-                        username=name, status=CheckStatus.AVAILABLE, source="mtproto",
-                        detail="claimability_verified",
-                    )
+                    if claimable is True:
+                        return CheckResult(
+                            username=name, status=CheckStatus.AVAILABLE,
+                            source="mtproto", detail="claimability_verified",
+                        )
+                    # The user session could not answer (rate-limited, etc.) -
+                    # fall through: the verdict stays honestly unverified.
                 # No user session - the verdict is honest about what it could
                 # not check: "nobody owns it" is confirmed, "Telegram will give
                 # it to you" is not. The result screen states this caveat.
