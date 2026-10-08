@@ -28,7 +28,7 @@ from app.search.finder import SearchCriteria, TARGET_VARIANTS
 from app.search.pattern import premium_rating
 from app.search.scanner import UsernameScanner
 from app.services.i18n import t
-from app.services.search_queue import SearchQueue, priority_for
+from app.services.search_queue import SearchQueue
 from app.telegram.username_checker import UsernameChecker
 from app.utils.logging_setup import get_logger
 from app.utils.username import parse_username
@@ -91,9 +91,7 @@ async def cmd_variants(
         return
 
     criteria = SearchCriteria(target=TARGET_VARIANTS, seed=parsed.value)
-    placeholder = await message.answer(
-        t(lang, "variants.queued", n=1), reply_markup=back_home_keyboard(lang)
-    )
+    placeholder = await message.answer(t(lang, "variants.started"))
 
     ahead = await search_queue.submit(
         user_id=message.from_user.id,
@@ -102,7 +100,6 @@ async def cmd_variants(
         criteria=criteria,
         lang=lang,
         used=1,
-        priority=priority_for(user.privilege),
     )
 
     if ahead == -1:
@@ -111,20 +108,13 @@ async def cmd_variants(
         )
         return
     if ahead == 0:
-        await placeholder.edit_text(
-            t(lang, "search.running"), reply_markup=back_home_keyboard(lang)
-        )
+        await placeholder.edit_text(t(lang, "search.running"))
         return
 
     try:
-        await placeholder.edit_text(
-            t(lang, "variants.queued", n=ahead), reply_markup=back_home_keyboard(lang)
-        )
+        await placeholder.edit_text(t(lang, "variants.started"))
     except Exception:
-        await bot.send_message(
-            placeholder.chat.id, t(lang, "variants.queued", n=ahead),
-            reply_markup=back_home_keyboard(lang),
-        )
+        await bot.send_message(placeholder.chat.id, t(lang, "variants.started"))
 
 
 @router.callback_query(F.data.startswith(f"{cb.FIND_VARIANTS_PREFIX}:"))
@@ -154,7 +144,6 @@ async def cb_variants(
         criteria=criteria,
         lang=lang,
         used=1,
-        priority=priority_for(user.privilege),
     )
 
     if ahead == -1:
@@ -165,17 +154,14 @@ async def cb_variants(
         return
 
     await callback.answer()
+    # No buttons while the hunt runs - the result replaces this message.
     if message is not None:
         try:
-            await message.edit_text(
-                t(lang, "variants.queued", n=ahead), reply_markup=back_home_keyboard(lang)
-            )
+            await message.edit_text(t(lang, "variants.started"))
             return
         except Exception:
             pass
-    await bot.send_message(
-        chat_id, t(lang, "variants.queued", n=ahead), reply_markup=back_home_keyboard(lang)
-    )
+    await bot.send_message(chat_id, t(lang, "variants.started"))
 
 
 # --------------------------------------------------------------------- bulk check

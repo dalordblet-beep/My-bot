@@ -22,7 +22,7 @@ from app.search.finder import TARGET_FREE, SearchCriteria
 from app.services import user as user_service
 from app.services.daily_drop import DEFAULT_HOUR
 from app.services.i18n import LANGUAGES, normalise, t
-from app.services.search_queue import SearchQueue, priority_for
+from app.services.search_queue import SearchQueue
 from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -191,7 +191,6 @@ async def cb_digest_now(
         criteria=criteria,
         lang=lang,
         used=1,
-        priority=priority_for(user.privilege),
         kind="digest",
     )
 

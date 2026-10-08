@@ -34,7 +34,7 @@ from app.search.pattern import mask_is_usable
 from app.services import user as user_service
 from app.services.i18n import t
 from app.services.runtime_config import runtime
-from app.services.search_queue import SearchQueue, priority_for
+from app.services.search_queue import SearchQueue
 from app.telegram.username_checker import UsernameChecker
 from app.utils.enums import CheckStatus
 from app.utils.logging_setup import get_logger
@@ -291,11 +291,11 @@ async def cb_run(
         criteria=criteria,
         lang=lang,
         used=used,
-        priority=priority_for(user.privilege),
     )
 
     if ahead == -1:
-        # Queue is saturated. Say so plainly instead of silently doing nothing.
+        # The bot is at capacity. Say so plainly instead of silently doing
+        # nothing - the search is NOT running yet, so the home button is safe.
         text = t(lang, "search.queue_full")
         if message is not None:
             with contextlib.suppress(Exception):
@@ -304,22 +304,24 @@ async def cb_run(
         return
 
     if ahead == 0:
-        # An identical search from this user is already waiting - do not count
-        # the attempt twice, and do not queue the work twice.
+        # An identical search is already running - do not count the attempt
+        # twice, and do not start the work twice.
         await callback.answer(t(lang, "search.running"))
         return
 
     await state.update_data(attempts=used)
     await callback.answer()
 
-    text = t(lang, "search.queued", n=ahead)
+    # No buttons on a running search: leaving this message alone is exactly
+    # what keeps the live progress screen (and its result) intact.
+    text = t(lang, "search.started")
     if message is not None:
         try:
-            await message.edit_text(text, reply_markup=back_home_keyboard(lang))
+            await message.edit_text(text)
             return
         except Exception:
             pass
-    await bot.send_message(chat_id, text, reply_markup=back_home_keyboard(lang))
+    await bot.send_message(chat_id, text)
 
 
 # -------------------------------------------------------------- username watches

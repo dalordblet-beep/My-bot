@@ -139,7 +139,7 @@ async def run() -> None:
 
     # Searches run through a queue so a user never waits on Telegram pacing, and
     # so the safe request rate holds no matter how many people press Run at once.
-    search_queue = SearchQueue(bot, checker, collectible_checker, workers=1)
+    search_queue = SearchQueue(bot, checker, collectible_checker)
     daily_drop = DailyDropService(bot, search_queue)
 
     dp = build_dispatcher(cache, checker, collectible_checker, captcha_service, search_queue)

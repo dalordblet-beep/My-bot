@@ -137,19 +137,19 @@ async def collectible_checker():
 
 @pytest_asyncio.fixture(scope="function")
 async def search_queue(bot, checker, collectible_checker):
-    """The search queue, not started by default.
+    """The search runner, not started by default.
 
-    Tests that only exercise the wizard assert on the "queued" reply; tests that
-    exercise the worker call ``search_queue.start()`` themselves.
+    Tests that only exercise the wizard assert on the "running" reply; tests
+    that exercise the live search call ``search_queue.start()`` themselves.
 
-    Scoped per test on purpose: the queue owns an ``asyncio.Queue`` that is bound
-    to the running event loop, and pytest-asyncio gives each test its own loop.
-    Sharing it across tests would make worker behaviour order-dependent and blow
+    Scoped per test on purpose: the runner owns asyncio tasks bound to the
+    running event loop, and pytest-asyncio gives each test its own loop.
+    Sharing it across tests would make behaviour order-dependent and blow
     up with "bound to a different event loop".
     """
     from app.services.search_queue import SearchQueue
 
-    queue = SearchQueue(bot, checker, collectible_checker, workers=1)
+    queue = SearchQueue(bot, checker, collectible_checker)
     yield queue
     await queue.stop()
 

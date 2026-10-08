@@ -1,21 +1,21 @@
-"""A queue for user-initiated searches.
+"""Parallel search runner - one independent task per search.
 
-Why this exists
----------------
-Telegram rate-limits the authoritative username check at roughly 20-30 calls per
-account per minute, and the bot paces every call at ``REQUEST_DELAY`` to stay
-under it. Running a search inline therefore makes the *user* wait on that
-pacing - up to ~30 seconds - and the wait grows with the number of people using
-the bot at once.
+Why there is no queue anymore
+-----------------------------
+Searches used to be serialised through worker tasks pulling from a priority
+queue. That meant a single wedged search - a dead session, an unexpected
+Telegram reply, any bug - stalled every user behind it, because everyone
+shared one worker. The queue is gone: every search now runs as its own
+independent asyncio task, so a broken search can only break itself.
 
-A queue separates the two: the user asks for a search and is answered
-immediately ("queued, N ahead"), while a worker performs the work at the safe
-rate and delivers the result when it is ready.
+The physical constraint never disappeared - Telegram still throttles the
+authoritative username check. It is handled where it belongs: the shared
+request-rate limiter inside ``UsernameChecker`` paces every call no matter
+how many searches run at once. Concurrency only means the safe rate is
+shared, never that it is exceeded.
 
-The physical limit does not disappear - it never can. What disappears is the
-*user-facing* limit: anyone may queue as many searches as they like, and higher
-privileges are simply served first. That is what a paid tier actually buys, and
-it is how large public bots can offer "unlimited" search without dying.
+Back-pressure still exists (``max_pending`` concurrent searches), and pressing
+Run twice for the same thing never duplicates the work.
 """
 
 from __future__ import annotations
@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from aiogram import Bot
 
@@ -39,25 +39,14 @@ from app.database.database import session_scope
 from app.search.finder import (
     SCREEN_CAP,
     SearchCriteria,
-    TARGET_VARIANTS,
     UsernameFinder,
 )
 from app.services.i18n import t
+from app.services.runtime_config import runtime
 from app.telegram.username_checker import UsernameChecker
-from app.utils.enums import Privilege
 from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
-
-# Lower number = served sooner. Everyone shares one queue, so the priority is
-# the whole point of a paid tier.
-PRIORITY_BY_PRIVILEGE = {
-    Privilege.ADMIN.value: 0,
-    Privilege.PREMIUM.value: 10,
-    Privilege.VIP.value: 20,
-    Privilege.FREE.value: 30,
-}
-DEFAULT_PRIORITY = 30
 
 # Refuse to grow without bound if something goes wrong upstream.
 MAX_PENDING = 500
@@ -79,26 +68,19 @@ _BAR_EMPTY = "▱"
 _BAR_HEAD = "◆"
 
 
-def priority_for(privilege: str | None) -> int:
-    """Queue priority for a privilege level - lower is served first."""
-    return PRIORITY_BY_PRIVILEGE.get(privilege or "", DEFAULT_PRIORITY)
-
-
-@dataclass(order=True)
+@dataclass
 class SearchJob:
-    """One queued search. Ordered by ``(priority, seq)`` so ties stay FIFO."""
+    """One running search. There is no ordering to express any more."""
 
-    priority: int
-    seq: int
-    user_id: int = field(compare=False)
-    chat_id: int = field(compare=False)
-    message_id: int | None = field(compare=False)
-    criteria: SearchCriteria = field(compare=False)
-    lang: str = field(compare=False)
-    used: int = field(compare=False)
+    user_id: int
+    chat_id: int
+    message_id: int | None
+    criteria: SearchCriteria
+    lang: str
+    used: int
     # "search" for a normal press of Run, "digest" for a Daily Drop so the
     # delivered message can carry the Daily Drop banner.
-    kind: str = field(compare=False, default="search")
+    kind: str = "search"
 
     @property
     def dedup_key(self) -> str:
@@ -106,69 +88,74 @@ class SearchJob:
 
 
 class SearchQueue:
-    """Serialises searches through worker task(s) so the user never waits."""
+    """Runs every submitted search as its own independent task.
+
+    The name is historical. There is no queue: ``submit`` either starts the
+    search immediately (returning ``1``), reports an identical running search
+    (``0``), or refuses when the bot is at capacity (``-1``).
+
+    Until :meth:`start` is called - in production, at boot before any request -
+    submitted jobs are held and spawned together with everything that follows,
+    so no search can be silently lost.
+    """
 
     def __init__(
         self,
         bot: Bot,
         checker: UsernameChecker,
         collectible_checker: CollectibleChecker | None = None,
-        workers: int = 1,
         max_pending: int = MAX_PENDING,
     ) -> None:
         self._bot = bot
         self._checker = checker
         self._collectible = collectible_checker
-        self._workers = max(1, int(workers))
         self._max_pending = max(1, int(max_pending))
-        self._queue: asyncio.PriorityQueue[SearchJob] = asyncio.PriorityQueue()
-        self._tasks: list[asyncio.Task] = []
-        self._seq = 0
         self._pending: dict[str, SearchJob] = {}
+        self._tasks: set[asyncio.Task] = set()
+        self._started = False
         self.done = 0
         self.failed = 0
 
     # ------------------------------------------------------------------ control
     def start(self) -> None:
-        if self.running:
-            return
-        self._tasks = [
-            asyncio.create_task(self._worker(), name=f"search-worker-{index}")
-            for index in range(self._workers)
-        ]
-        logger.info("search queue started with %d worker(s)", self._workers)
+        """Arm the runner and spawn anything submitted before it."""
+        self._started = True
+        for key, job in list(self._pending.items()):
+            self._spawn(job, key)
 
     @property
     def running(self) -> bool:
-        return any(not task.done() for task in self._tasks)
+        return self._started
 
     async def stop(self) -> None:
-        tasks, self._tasks = self._tasks, []
+        """Cancel every live search. Used on shutdown and between tests."""
+        self._started = False
+        tasks, self._tasks = list(self._tasks), set()
+        self._pending.clear()
         for task in tasks:
             task.cancel()
         for task in tasks:
             with contextlib.suppress(asyncio.CancelledError):
                 await task
-        logger.info("search queue stopped")
+        logger.info("search runner stopped")
 
     def drain(self) -> None:
-        """Drop anything still waiting and reset the counters.
+        """Drop everything still alive and reset the counters.
 
-        Used on shutdown and between tests, so a job queued in one context can
-        never be delivered in another.
+        Used between tests, so a search spawned in one context can never be
+        delivered in another.
         """
+        for task in self._tasks:
+            task.cancel()
+        self._tasks.clear()
         self._pending.clear()
-        while not self._queue.empty():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                self._queue.get_nowait()
         self.done = 0
         self.failed = 0
-        self._seq = 0
 
     # ------------------------------------------------------------------ submit
     @property
     def pending(self) -> int:
-        return self._queue.qsize()
+        return len(self._pending)
 
     async def submit(
         self,
@@ -179,46 +166,40 @@ class SearchQueue:
         criteria: SearchCriteria,
         lang: str,
         used: int,
-        priority: int = DEFAULT_PRIORITY,
         kind: str = "search",
     ) -> int:
-        """Queue a search. Returns how many jobs are ahead of it.
-
-        ``-1`` means the queue is full, ``0`` means an identical request from the
-        same user is already waiting (so pressing Run twice does not queue the
-        work twice).
-        """
+        """Start a search. ``1`` = started, ``0`` = identical one already
+        running for this user, ``-1`` = the bot is at capacity."""
         key = f"{user_id}:{criteria.describe()}"
         if key in self._pending:
             return 0
-        if self._queue.qsize() >= self._max_pending:
-            logger.warning("search queue is full (%d), rejecting a job", self._max_pending)
+        if len(self._pending) >= self._max_pending:
+            logger.warning("search runner at capacity (%d), refusing a job", self._max_pending)
             return -1
 
-        self._seq += 1
-        job = SearchJob(
-            priority, self._seq, user_id, chat_id, message_id, criteria, lang, used, kind
-        )
+        job = SearchJob(user_id, chat_id, message_id, criteria, lang, used, kind)
         self._pending[key] = job
-        await self._queue.put(job)
-        return self._queue.qsize()
+        if self._started:
+            self._spawn(job, key)
+        return 1
 
-    # ------------------------------------------------------------------ worker
-    async def _worker(self) -> None:
-        while True:
-            job = await self._queue.get()
-            try:
-                await self._process(job)
-                self.done += 1
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:  # one bad job must not kill the worker
-                self.failed += 1
-                logger.exception("search job failed: %s", exc)
-                await self._deliver_error(job)
-            finally:
-                self._pending.pop(job.dedup_key, None)
-                self._queue.task_done()
+    def _spawn(self, job: SearchJob, key: str) -> None:
+        task = asyncio.create_task(self._run(job, key))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    async def _run(self, job: SearchJob, key: str) -> None:
+        try:
+            await self._process(job)
+            self.done += 1
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # one broken search must never touch another
+            self.failed += 1
+            logger.exception("search failed: %s", exc)
+            await self._deliver_error(job)
+        finally:
+            self._pending.pop(key, None)
 
     async def _process(self, job: SearchJob) -> None:
         finder = UsernameFinder(self._checker, self._collectible)
@@ -292,9 +273,12 @@ class SearchQueue:
         confirmations = snapshot["confirmations"]
         budget = snapshot["budget"] or 1
         screened = snapshot["screened"]
+        # The scan limit matches what the finder actually uses, so the bar
+        # stays honest in unlimited mode too.
+        cap = 5000 if runtime.unlimited_search else SCREEN_CAP
         # Two truthful sources of motion: authoritative checks move the bar in
         # jumps, free screening creeps it forward between them.
-        share = max(confirmations / budget, screened / SCREEN_CAP)
+        share = max(confirmations / budget, screened / cap)
         share = min(share, 0.99)
         pct = max(1, round(share * 100))
         filled = max(1, min(BAR_CELLS - 1, round(BAR_CELLS * share)))
@@ -357,7 +341,7 @@ class SearchQueue:
                 )
                 return
             except Exception as exc:
-                logger.debug("could not edit the queued message: %s", exc)
+                logger.debug("could not edit the search message: %s", exc)
         await self._bot.send_message(job.chat_id, text, reply_markup=keyboard)
 
     async def _deliver_error(self, job: SearchJob) -> None:

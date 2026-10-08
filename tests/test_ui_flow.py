@@ -157,7 +157,7 @@ async def test_search_run_answers_at_once_with_a_queue_position(
     await press(dispatcher, bot, mock_session, "menu:find")
     text = await press(dispatcher, bot, mock_session, "find:run")
 
-    assert "QUEUED" in text.upper()
+    assert "RUNNING" in text.upper()
 
 
 async def test_queue_worker_delivers_the_result_into_the_same_message(

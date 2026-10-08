@@ -32,7 +32,7 @@ from aiogram import Bot
 from app.database import repository as repo
 from app.database.database import session_scope
 from app.search.finder import SearchCriteria, TARGET_FREE
-from app.services.search_queue import SearchQueue, priority_for
+from app.services.search_queue import SearchQueue
 from app.utils.logging_setup import get_logger
 
 logger = get_logger(__name__)
@@ -154,10 +154,9 @@ class DailyDropService:
             criteria=criteria,
             lang=lang,
             used=1,
-            priority=priority_for(user.privilege),
             kind="digest",
         )
         if ahead == -1:
-            logger.warning("daily drop queue full - skipping %s", telegram_id)
+            logger.warning("daily drop at capacity - skipping %s", telegram_id)
             return False
         return True

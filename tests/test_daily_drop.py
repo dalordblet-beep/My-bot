@@ -81,7 +81,7 @@ async def test_get_one_now_queues_a_digest_job(
     mock_session.reset()
     await dispatcher.feed_update(bot, make_update_callback(USER, "digest:now"))
 
-    assert "QUEUED" in mock_session.last_edited_text().upper()
+    assert "RUNNING" in mock_session.last_edited_text().upper()
     jobs = list(search_queue._pending.values())
     assert len(jobs) == 1
     assert jobs[0].kind == "digest"

@@ -427,13 +427,12 @@ EN: dict[str, str] = {
     "search.progress_phase_valuable": "{compass} <i>Hunting the beautiful names…</i>",
     "search.progress_phase_guarantee": "{gem} <i>Digging for a free one…</i>",
     "search.progress_checked": "{bolt} Checked: <b>{n}</b> · {s}s",
-    "search.queued": (
-        "{search} <b>QUEUED</b> - position {n}\n\n"
-        "The search is running at a safe Telegram rate. I will send the result "
-        "right here, so you can leave this screen."
+    "search.started": (
+        "{search} <b>SEARCH RUNNING</b>\n\n"
+        "The result will arrive right here - keep this screen open."
     ),
     "search.queue_full": (
-        "{warn} The queue is full right now. Wait a moment and press again."
+        "{warn} The bot is at capacity right now. Wait a moment and press again."
     ),
     "search.result_title": "<b>RESULT</b>",
     "search.hit_free": "{check} <b>FREE</b> - nobody owns it",
@@ -514,9 +513,9 @@ EN: dict[str, str] = {
         "{warn} Nothing close to <b>@{seed}</b> is free right now.\n\n"
         "Try a shorter root, or a different suffix."
     ),
-    "variants.queued": (
-        "{search} <b>HUNTING VARIANTS</b> - position {n}\n\n"
-        "I will post the free ones right here."
+    "variants.started": (
+        "{search} <b>HUNTING VARIANTS</b>\n\n"
+        "The free ones will be posted right here."
     ),
     "variants.usage": "{info} Usage: <code>/variants moged</code>",
     "variants.invalid": "{warn} That is not a usable username.",
@@ -567,7 +566,7 @@ EN: dict[str, str] = {
     "digest.turn_off": "Turn off",
     "digest.now": "Get one now",
     "digest.now_queued": (
-        "{search} <b>QUEUED</b> - your Daily Drop will arrive here."
+        "{search} <b>DROP RUNNING</b> - your Daily Drop will arrive here."
     ),
 
     # ---------------------------------------------------------- username watches
@@ -1290,13 +1289,12 @@ RU: dict[str, str] = {
     "search.progress_phase_valuable": "{compass} <i>Перебираю красивые имена…</i>",
     "search.progress_phase_guarantee": "{gem} <i>Копаю до свободного…</i>",
     "search.progress_checked": "{bolt} Проверено: <b>{n}</b> · {s}с",
-    "search.queued": (
-        "{search} <b>В ОЧЕРЕДИ</b> — позиция {n}\n\n"
-        "Поиск идёт на безопасной для Telegram скорости. Результат пришлю сюда "
-        "же, так что можно уйти с этого экрана."
+    "search.started": (
+        "{search} <b>ПОИСК ЗАПУЩЕН</b>\n\n"
+        "Результат придёт прямо сюда — не отходите от экрана."
     ),
     "search.queue_full": (
-        "{warn} Очередь сейчас заполнена. Подождите минуту и нажмите снова."
+        "{warn} Бот сейчас на пределе возможностей. Подождите минуту и нажмите снова."
     ),
     "search.result_title": "<b>РЕЗУЛЬТАТ</b>",
     "search.hit_free": "{check} <b>СВОБОДЕН</b> — владельца нет",
@@ -1376,8 +1374,8 @@ RU: dict[str, str] = {
         "{warn} Ничего близкого к <b>@{seed}</b> сейчас не свободно.\n\n"
         "Попробуйте более короткую основу или другую приставку."
     ),
-    "variants.queued": (
-        "{search} <b>ИЩУ ВАРИАНТЫ</b> — позиция {n}\n\n"
+    "variants.started": (
+        "{search} <b>ИЩУ ВАРИАНТЫ</b>\n\n"
         "Свободные пришлю сюда же."
     ),
     "variants.usage": "{info} Использование: <code>/variants moged</code>",
@@ -1429,7 +1427,7 @@ RU: dict[str, str] = {
     "digest.turn_off": "Выключить",
     "digest.now": "Получить сейчас",
     "digest.now_queued": (
-        "{search} <b>В ОЧЕРЕДИ</b> — ваш Daily Drop придёт сюда."
+        "{search} <b>ЗАПУЩЕНО</b> — ваш Daily Drop придёт сюда."
     ),
 
     # --------------------------------------------------------- username watches
