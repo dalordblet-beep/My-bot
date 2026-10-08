@@ -19,6 +19,7 @@ class AdminStates(StatesGroup):
     waiting_note = State()
     waiting_setting_value = State()
     waiting_privilege_target = State()
+    waiting_subscription_target = State()
 
 
 class CaptchaStates(StatesGroup):

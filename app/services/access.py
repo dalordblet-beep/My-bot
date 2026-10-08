@@ -166,10 +166,20 @@ class AccessGuard:
         Returns ``{subscription_key: joined}``. A subscription that is not
         configured (no id and no username) counts as joined so a half-configured
         deployment cannot lock everyone out.
+
+        The cache is rejected whenever the set of required subscription keys
+        changes - that is how a channel the admin adds later starts blocking
+        existing users on their very next interaction instead of being ignored
+        until the old cache entry silently expired.
         """
+        required_keys = {sub.key for sub in subs}
         cached = self._membership_cache.get(user.telegram_id)
         now = time.monotonic()
-        if cached is not None and now - cached[0] < settings.membership_recheck_ttl:
+        if (
+            cached is not None
+            and now - cached[0] < settings.membership_recheck_ttl
+            and set(cached[1].keys()) == required_keys
+        ):
             return cached[1]
 
         results: dict[str, bool] = {}
@@ -201,6 +211,15 @@ class AccessGuard:
 
     def invalidate(self, telegram_id: int) -> None:
         self._membership_cache.pop(telegram_id, None)
+
+    def invalidate_all(self) -> None:
+        """Drop every cached membership verdict.
+
+        Call this after the admin adds or removes a required subscription so the
+        new requirement is enforced (or dropped) for all users immediately,
+        without waiting for each per-user cache to age out.
+        """
+        self._membership_cache.clear()
 
 
 access_guard = AccessGuard()

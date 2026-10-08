@@ -283,14 +283,29 @@ EN: dict[str, str] = {
     "admin.alogs_title": "{clipboard} <b>ADMIN LOGS</b>",
     "admin.alogs_empty": "{clipboard} <b>ADMIN LOGS</b>\n\nNo actions yet.",
 
-    "admin.access_title": "{channel} <b>ACCESS SETTINGS</b>",
-    "admin.access_channel_id": "Required channel id",
-    "admin.access_channel_user": "Required channel username",
-    "admin.access_chat_id": "Required chat id",
-    "admin.access_chat_user": "Required chat username",
-    "admin.access_hint": "Editing is done from the panel; secrets stay in .env.",
-    "admin.access_subs": "<b>Effective subscriptions ({n}):</b>",
-    "admin.access_sub_item": "{n}. {title} - <code>{id}</code>",
+    "admin.subs_title": "{shield} <b>REQUIRED SUBSCRIPTIONS</b>",
+    "admin.subs_hint": (
+        "These channels are mandatory for every user. Add or remove them here - "
+        "no restart needed. When you add a channel, users who already joined the "
+        "others are asked to join the new one on their next action."
+    ),
+    "admin.subs_none": "No mandatory subscriptions are set - users skip this step.",
+    "admin.subs_managed": "<b>Mandatory ({n}):</b>",
+    "admin.subs_item": "{n}. {title} - <code>{id}</code>",
+    "admin.subs_legacy": "<b>From .env (read-only):</b>",
+    "admin.subs_add_prompt": (
+        "Send the channel: @username, a t.me link, a private invite "
+        "(https://t.me/+...), or a numeric id. The bot will resolve it."
+    ),
+    "admin.subs_add_help": (
+        "Examples: @my_channel  |  https://t.me/my_channel  |  "
+        "https://t.me/+AbCdEfGh  |  -1001234567890"
+    ),
+    "admin.subs_added": "Added: {title}",
+    "admin.subs_failed": "Could not resolve that channel. Check the link/id and try again.",
+    "admin.subs_duplicate": "{title} is already in the list.",
+    "admin.subs_removed": "Removed: {title}",
+    "admin.subs_invalid": "Send a channel @username, link or id (one line).",
 
     "admin.settings_title": "{settings} <b>BOT SETTINGS</b>",
     "admin.settings_hint": "Tap a parameter to change it. Secrets stay in .env and are never editable here.",
@@ -343,7 +358,7 @@ EN: dict[str, str] = {
     "btn.privileges": "Privileges",
     "btn.statistics": "Statistics",
     "btn.search_logs": "Search logs",
-    "btn.access": "Access settings",
+    "btn.access": "Required subscriptions",
     "btn.bot_settings": "Bot settings",
     "btn.system": "System",
     "btn.admin_logs": "Admin logs",
@@ -354,6 +369,8 @@ EN: dict[str, str] = {
     "btn.note": "Admin note",
     "btn.actions": "Actions",
     "btn.cancel": "Cancel",
+    "btn.add_channel": "Add channel",
+    "btn.remove_sub": "Remove",
     "btn.mode_basic": "Basic",
     "btn.mode_collectible": "Collectible",
     "btn.mode_all_in_one": "All-in-One",
@@ -1128,14 +1145,30 @@ RU: dict[str, str] = {
     "admin.alogs_title": "{clipboard} <b>ЛОГИ АДМИНИСТРАТОРОВ</b>",
     "admin.alogs_empty": "{clipboard} <b>ЛОГИ АДМИНИСТРАТОРОВ</b>\n\nДействий пока нет.",
 
-    "admin.access_title": "{channel} <b>НАСТРОЙКИ ДОСТУПА</b>",
-    "admin.access_channel_id": "ID обязательного канала",
-    "admin.access_channel_user": "Username обязательного канала",
-    "admin.access_chat_id": "ID обязательного чата",
-    "admin.access_chat_user": "Username обязательного чата",
-    "admin.access_hint": "Редактирование — из панели; секреты остаются в .env.",
-    "admin.access_subs": "<b>Активные подписки ({n}):</b>",
-    "admin.access_sub_item": "{n}. {title} — <code>{id}</code>",
+    "admin.subs_title": "{shield} <b>ОБЯЗАТЕЛЬНЫЕ ПОДПИСКИ</b>",
+    "admin.subs_hint": (
+        "Эти каналы обязательны для каждого пользователя. Добавляйте или убирайте "
+        "их отсюда — перезапуск не нужен. Когда вы добавляете канал, пользователи, "
+        "уже вступившие в остальные, получат просьбу вступить в новый при следующем "
+        "действии."
+    ),
+    "admin.subs_none": "Обязательных подписок нет — пользователи пропускают этот шаг.",
+    "admin.subs_managed": "<b>Обязательные ({n}):</b>",
+    "admin.subs_item": "{n}. {title} — <code>{id}</code>",
+    "admin.subs_legacy": "<b>Из .env (только чтение):</b>",
+    "admin.subs_add_prompt": (
+        "Отправьте канал: @username, ссылку t.me, приватное приглашение "
+        "(https://t.me/+...) или числовой id. Бот определит его сам."
+    ),
+    "admin.subs_add_help": (
+        "Примеры: @my_channel  |  https://t.me/my_channel  |  "
+        "https://t.me/+AbCdEfGh  |  -1001234567890"
+    ),
+    "admin.subs_added": "Добавлено: {title}",
+    "admin.subs_failed": "Не удалось определить канал. Проверьте ссылку/id и попробуйте снова.",
+    "admin.subs_duplicate": "{title} уже в списке.",
+    "admin.subs_removed": "Убрано: {title}",
+    "admin.subs_invalid": "Отправьте @username, ссылку или id канала (в одну строку).",
 
     "admin.settings_title": "{settings} <b>НАСТРОЙКИ БОТА</b>",
     "admin.settings_hint": "Нажмите параметр, чтобы изменить. Секреты остаются в .env и здесь недоступны.",
@@ -1188,7 +1221,7 @@ RU: dict[str, str] = {
     "btn.privileges": "Привилегии",
     "btn.statistics": "Статистика",
     "btn.search_logs": "Логи поисков",
-    "btn.access": "Доступ",
+    "btn.access": "Обязательные подписки",
     "btn.bot_settings": "Настройки бота",
     "btn.system": "Система",
     "btn.admin_logs": "Логи админов",
@@ -1199,6 +1232,8 @@ RU: dict[str, str] = {
     "btn.note": "Заметка",
     "btn.actions": "Действия",
     "btn.cancel": "Отмена",
+    "btn.add_channel": "Добавить канал",
+    "btn.remove_sub": "Убрать",
     "btn.mode_basic": "Обычный",
     "btn.mode_collectible": "Коллекционный",
     "btn.mode_all_in_one": "Всё сразу",

@@ -26,6 +26,7 @@ from app.bot.keyboards.admin_kb import (
     blacklist_keyboard,
     logs_keyboard,
     privilege_picker_keyboard,
+    subscriptions_admin_keyboard,
     user_list_keyboard,
     user_profile_keyboard,
     user_search_keyboard,
@@ -37,9 +38,18 @@ from app.database import repository as repo
 from app.database.models import User
 from app.services import admin as admin_service
 from app.services import statistics as stats_service
+from app.services.access import access_guard
 from app.services.i18n import t
 from app.services.runtime_config import OVERRIDABLE, runtime
-from app.services.subscriptions import required_subs
+from app.services.subscriptions import (
+    RequiredSub,
+    add_subscription,
+    legacy_subs,
+    list_managed_subs,
+    remove_subscription,
+    serialize_subs,
+)
+from app.telegram.bot_api import lookup_chat
 from app.utils.enums import Permission, Privilege
 from app.utils.logging_setup import get_logger
 
@@ -512,20 +522,116 @@ async def _render_action_logs(
 @router.callback_query(F.data == cb.ADMIN_ACCESS)
 async def cb_access(callback: CallbackQuery, bot: Bot, lang: str = "en") -> None:
     await callback.answer()
-    pairs = [
-        (key, label)
-        for key, (_, label, _) in OVERRIDABLE.items()
-        if key.startswith("required_")
-    ]
+    managed = list_managed_subs()
+    # The legacy .env pair applies only when no runtime-managed list exists;
+    # required_subs() ignores it once the JSON list is non-empty.
+    legacy = legacy_subs() if not managed else []
     await _edit(
         callback, bot,
-        texts.access_settings_screen(
-            lang,
-            runtime.required_channel_id, runtime.required_channel_username,
-            runtime.required_chat_id, runtime.required_chat_username,
-            subs=required_subs(),
-        ),
-        admin_settings_keyboard(lang, pairs),
+        texts.subscriptions_admin_screen(lang, managed, legacy),
+        subscriptions_admin_keyboard(lang, managed),
+    )
+
+
+@router.callback_query(F.data == cb.ADMIN_SUB_ADD)
+async def cb_sub_add(
+    callback: CallbackQuery, bot: Bot, state: FSMContext, user: User, lang: str = "en"
+) -> None:
+    if not admin_service.has_permission(user, Permission.ADMIN_SETTINGS):
+        await callback.answer(t(lang, "admin.not_authorized"), show_alert=True)
+        return
+    await state.set_state(AdminStates.waiting_subscription_target)
+    await callback.answer()
+    await _edit(
+        callback, bot,
+        f"{t(lang, 'admin.subs_add_prompt')}\n\n<code>{t(lang, 'admin.subs_add_help')}</code>",
+        admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+    )
+
+
+@router.message(AdminStates.waiting_subscription_target, F.text)
+async def on_subscription_target(
+    message: Message, session: AsyncSession, user: User, bot: Bot, state: FSMContext, lang: str = "en"
+) -> None:
+    await state.clear()
+    if not admin_service.has_permission(user, Permission.ADMIN_SETTINGS):
+        await message.answer(t(lang, "admin.denied"), reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS))
+        return
+
+    raw = (message.text or "").strip()
+    chat_ref, invite_url = _parse_channel_input(raw)
+    if chat_ref is None:
+        await message.answer(
+            t(lang, "admin.subs_invalid"),
+            reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+        )
+        return
+
+    resolved = await lookup_chat(bot, chat_ref)
+    if resolved.found:
+        title = resolved.title or (f"@{raw.lstrip('@')}" if raw.startswith("@") else raw)
+        key = (raw.lstrip("@").split("/")[-1] if raw.startswith("@") else str(resolved.chat_id))
+        sub = RequiredSub(
+            key=key,
+            chat_id=resolved.chat_id or 0,
+            username=(raw.lstrip("@") if raw.startswith("@") else ""),
+            invite_url=invite_url or "",
+            label=title,
+        )
+        existing = list_managed_subs()
+        if any(s.key == sub.key or (sub.username and s.username == sub.username) for s in existing):
+            await message.answer(
+                t(lang, "admin.subs_duplicate", title=title),
+                reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+            )
+            return
+        new_list = await add_subscription(session, sub)
+        await admin_service.update_bot_setting(session, user, "required_subscriptions", serialize_subs(new_list))
+        await message.answer(
+            t(lang, "admin.subs_added", title=title),
+            reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+        )
+        return
+
+    # Private invite we could not resolve: still usable as a join button.
+    if invite_url:
+        sub = RequiredSub(key=invite_url.split("/")[-1] or "invite", invite_url=invite_url, label=invite_url)
+        await add_subscription(session, sub)
+        await message.answer(
+            t(lang, "admin.subs_added", title=invite_url),
+            reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+        )
+        return
+
+    await message.answer(
+        t(lang, "admin.subs_failed"),
+        reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+    )
+
+
+@router.callback_query(F.data.startswith(f"{cb.ADMIN_SUB_REMOVE_PREFIX}:"))
+async def cb_sub_remove(
+    callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
+) -> None:
+    if not admin_service.has_permission(user, Permission.ADMIN_SETTINGS):
+        await callback.answer(t(lang, "admin.not_authorized"), show_alert=True)
+        return
+    key = (callback.data or "").split(":", 2)[-1]
+    existing = list_managed_subs()
+    target = next((s for s in existing if s.key == key), None)
+    if target is None:
+        await callback.answer(t(lang, "admin.subs_invalid"), show_alert=True)
+        return
+    await remove_subscription(session, key)
+    await admin_service.update_bot_setting(session, user, "required_subscriptions", serialize_subs([s for s in existing if s.key != key]))
+    await callback.answer(t(lang, "admin.subs_removed", title=target.label or target.username or target.key))
+    await callback.answer(t(lang, "admin.subs_removed", title=target.label or target.username or target.key))
+    managed = list_managed_subs()
+    legacy = legacy_subs() if not managed else []
+    await _edit(
+        callback, bot,
+        texts.subscriptions_admin_screen(lang, managed, legacy),
+        subscriptions_admin_keyboard(lang, managed),
     )
 
 
@@ -633,6 +739,45 @@ def _parse_id_and_value(data: str | None) -> tuple[int | None, str | None]:
         return int(parts[-2]), parts[-1]
     except ValueError:
         return None, None
+
+
+def _parse_channel_input(raw: str) -> tuple[int | str | None, str | None]:
+    """Turn admin free-text into a chat reference Telegram can resolve.
+
+    Accepts ``@username``, a ``t.me`` link (public or private ``+`` invite),
+    or a numeric id. Returns ``(chat_ref, invite_url)`` where ``chat_ref`` is
+    what ``bot.get_chat`` accepts and ``invite_url`` is the join link to keep
+    for private channels. ``(None, None)`` means the input was unrecognised.
+    """
+    text = (raw or "").strip()
+    lowered = text.lower()
+
+    if "t.me/" in lowered:
+        tail = text.split("t.me/", 1)[-1].strip().strip("/")
+        if tail.startswith("+"):
+            invite = f"https://t.me/{tail}"
+            return invite, invite
+        if tail:
+            return f"@{tail}", f"https://t.me/{tail}"
+        return None, None
+
+    if text.startswith("@"):
+        username = text.lstrip("@")
+        if username:
+            return text, f"https://t.me/{username}"
+        return None, None
+
+    if text.lstrip("-").isdigit():
+        try:
+            return int(text), None
+        except ValueError:
+            return None, None
+
+    # Bare word: treat as a username without the leading @.
+    if text and not text.startswith("/") and " " not in text:
+        return f"@{text}", f"https://t.me/{text}"
+
+    return None, None
 
 
 async def _get_by_id(session: AsyncSession, telegram_id: int | None) -> User | None:

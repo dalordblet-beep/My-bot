@@ -71,7 +71,7 @@ def _parse(raw: str) -> list[RequiredSub]:
     return subs
 
 
-def _from_legacy() -> list[RequiredSub]:
+def legacy_subs() -> list[RequiredSub]:
     """Build the list from the old REQUIRED_CHANNEL_* / REQUIRED_CHAT_* pair."""
     subs: list[RequiredSub] = []
     if runtime.channel_configured:
@@ -99,7 +99,80 @@ def _from_legacy() -> list[RequiredSub]:
 
 def required_subs() -> list[RequiredSub]:
     """Every required subscription, in display order."""
-    return _parse(runtime.required_subscriptions) or _from_legacy()
+    return _parse(runtime.required_subscriptions) or legacy_subs()
+
+
+def parse_subs(raw: str) -> list[RequiredSub]:
+    """Public alias of the JSON parser used by the admin subscription manager."""
+    return _parse(raw)
+
+
+def serialize_subs(subs: list[RequiredSub]) -> str:
+    """Turn the managed list back into the JSON stored in runtime config."""
+    data: list[dict] = []
+    for sub in subs:
+        item: dict = {"key": sub.key}
+        if sub.chat_id:
+            item["id"] = sub.chat_id
+        if sub.username:
+            item["username"] = sub.username
+        if sub.invite_url:
+            item["invite_url"] = sub.invite_url
+        if sub.label:
+            item["title"] = sub.label
+        data.append(item)
+    return json.dumps(data, ensure_ascii=False)
+
+
+def list_managed_subs() -> list[RequiredSub]:
+    """Only the subscriptions stored in the runtime JSON list (no legacy pair)."""
+    return _parse(runtime.required_subscriptions)
+
+
+def _unique_key(subs: list[RequiredSub], sub: RequiredSub) -> str:
+    """Pick a key for ``sub`` that does not collide with an existing one."""
+    if sub.key and not any(s.key == sub.key for s in subs):
+        return sub.key
+    base = sub.username or sub.invite_url or "sub"
+    candidate = base
+    index = 2
+    existing = {s.key for s in subs}
+    while candidate in existing:
+        candidate = f"{base}{index}"
+        index += 1
+    return candidate
+
+
+async def save_managed_subs(session: AsyncSession, subs: list[RequiredSub]) -> None:
+    """Persist the managed list and forget cached membership verdicts."""
+    from app.services.access import access_guard
+
+    await runtime.set(session, "required_subscriptions", serialize_subs(subs))
+    access_guard.invalidate_all()
+
+
+async def add_subscription(session: AsyncSession, sub: RequiredSub) -> list[RequiredSub]:
+    """Append a subscription; returns the resulting managed list."""
+    subs = list_managed_subs()
+    if any(s.key == sub.key for s in subs):
+        sub = RequiredSub(
+            key=_unique_key(subs, sub),
+            chat_id=sub.chat_id,
+            username=sub.username,
+            invite_url=sub.invite_url,
+            label=sub.label,
+            label_key=sub.label_key,
+        )
+    subs.append(sub)
+    await save_managed_subs(session, subs)
+    return subs
+
+
+async def remove_subscription(session: AsyncSession, key: str) -> list[RequiredSub]:
+    """Drop the subscription with ``key``; returns the resulting managed list."""
+    subs = [s for s in list_managed_subs() if s.key != key]
+    await save_managed_subs(session, subs)
+    return subs
 
 
 def find_sub(key: str) -> RequiredSub | None:

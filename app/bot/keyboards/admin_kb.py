@@ -312,6 +312,34 @@ def settings_keyboard(lang: str, keys: list[tuple[str, str]]) -> InlineKeyboardM
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def subscriptions_admin_keyboard(lang: str, managed: list) -> InlineKeyboardMarkup:
+    """Editor for mandatory channels: remove each, add a new one, back."""
+    rows: list[list] = []
+    for sub in managed:
+        title = sub.label or sub.username or sub.key
+        label = f"{t(lang, 'btn.remove_sub')}: {title}"
+        if len(label) > 58:
+            label = label[:55] + "..."
+        rows.append(
+            [
+                btn(
+                    label, icon="ban", style=DANGER,
+                    callback_data=f"{cb.ADMIN_SUB_REMOVE_PREFIX}:{sub.key}",
+                )
+            ]
+        )
+    rows.append(
+        [
+            btn(
+                t(lang, "btn.add_channel"), icon="satellite", style=SUCCESS,
+                callback_data=cb.ADMIN_SUB_ADD,
+            )
+        ]
+    )
+    rows.append([btn(t(lang, "btn.back"), icon="back", style=NEUTRAL, callback_data=cb.ADMIN_ROOT)])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def logs_keyboard(lang: str, page: int, total_pages: int, prefix: str) -> InlineKeyboardMarkup:
     rows: list[list] = []
     nav = _nav(page, total_pages, prefix)

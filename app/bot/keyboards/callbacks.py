@@ -66,6 +66,8 @@ ADMIN_LOGS_PAGE_PREFIX = "adm:lgpage"
 ADMIN_ACTIONLOG_PAGE_PREFIX = "adm:alpage"
 ADMIN_SETTING_PREFIX = "adm:set"        # adm:set:<key>
 ADMIN_ACTIONS_PREFIX = "adm:actions"    # adm:actions:<telegram_id>
+ADMIN_SUB_ADD = "adm:subadd"            # adm:subadd
+ADMIN_SUB_REMOVE_PREFIX = "adm:subrm"   # adm:subrm:<key>
 
 ADMIN_MENU = "admin_menu"
 

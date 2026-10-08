@@ -617,30 +617,42 @@ def system_screen(lang: str, status: dict) -> str:
     )
 
 
-def access_settings_screen(
-    lang: str, channel_id: int, channel_username: str, chat_id: int, chat_username: str,
-    subs: list | None = None,
+def subscriptions_admin_screen(
+    lang: str,
+    managed: list,
+    legacy: list | None = None,
 ) -> str:
-    lines = [
-        t(lang, "admin.access_title"),
-        "",
-        f"{t(lang, 'admin.access_channel_id')}: <code>{channel_id or '-'}</code>",
-        f"{t(lang, 'admin.access_channel_user')}: <code>{channel_username or '-'}</code>",
-        "",
-        f"{t(lang, 'admin.access_chat_id')}: <code>{chat_id or '-'}</code>",
-        f"{t(lang, 'admin.access_chat_user')}: <code>{chat_username or '-'}</code>",
-    ]
-    if subs:
-        lines += ["", t(lang, "admin.access_subs", n=len(subs))]
-        for index, sub in enumerate(subs, start=1):
+    """The admin editor for mandatory subscriptions.
+
+    ``managed`` are the channels the admin can add/remove at runtime (stored in
+    the runtime JSON list); ``legacy`` are the read-only ones coming from .env.
+    """
+    lines = [t(lang, "admin.subs_title"), "", t(lang, "admin.subs_hint")]
+
+    if managed:
+        lines += ["", t(lang, "admin.subs_managed", n=len(managed))]
+        for index, sub in enumerate(managed, start=1):
             lines.append(
                 t(
-                    lang, "admin.access_sub_item",
-                    n=index, title=esc(sub_label(lang, sub, index)),
-                    id=sub.chat_id or sub.username or "-",
+                    lang, "admin.subs_item",
+                    n=index, title=esc(sub.label or sub.username or sub.key),
+                    id=sub.chat_id or f"@{sub.username}" if sub.username else sub.key,
                 )
             )
-    lines += ["", f"<i>{t(lang, 'admin.access_hint')}</i>"]
+    else:
+        lines += ["", t(lang, "admin.subs_none")]
+
+    if legacy:
+        lines += ["", t(lang, "admin.subs_legacy")]
+        for index, sub in enumerate(legacy, start=1):
+            lines.append(
+                t(
+                    lang, "admin.subs_item",
+                    n=index, title=esc(sub_label(lang, sub, index)),
+                    id=sub.chat_id or f"@{sub.username}" if sub.username else sub.key,
+                )
+            )
+
     return "\n".join(lines)
 
 
