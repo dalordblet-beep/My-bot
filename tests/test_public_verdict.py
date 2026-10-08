@@ -59,9 +59,13 @@ def _fragment_absent() -> str:
 
 
 class _Response:
-    def __init__(self, status: int, body: str) -> None:
+    def __init__(self, status: int, body: str, history: tuple = ()) -> None:
         self.status = status
         self._body = body
+        # aiohttp's final response carries the redirect trail here. Fragment
+        # answers "no page" with a 302, so a genuine absent shell always has
+        # one; an anti-bot shell answers a direct 200 with an empty trail.
+        self.history = history
 
     async def text(self) -> str:
         return self._body
@@ -71,6 +75,9 @@ class _Response:
 
     async def __aexit__(self, *exc):
         return False
+
+
+_REDIRECT = (_Response(302, ""),)
 
 
 class _FakeSession:
@@ -88,7 +95,13 @@ class _FakeSession:
         if url.startswith(pv.FRAGMENT_USERNAME_URL.split("{")[0]):
             name = url.rsplit("/", 1)[-1]
             body = self._fragment.get(name)
-            return _Response(200, body) if body is not None else _Response(404, "")
+            # Fragment follows a 302 for names it has no page for, so canned
+            # fragment bodies arrive as the redirect target by default.
+            return (
+                _Response(200, body, history=_REDIRECT)
+                if body is not None
+                else _Response(404, "")
+            )
         return _Response(404, "")
 
 
@@ -138,6 +151,33 @@ async def test_the_small_shell_on_both_sources_means_free():
     assert verdict.is_free is True
 
 
+async def test_a_direct_small_shell_is_never_free():
+    """The false-free hole, pinned shut.
+
+    Anti-bot / captcha shells are the same small size with the same bare
+    "Fragment" title as a genuine no-page answer. The difference is the
+    redirect: Fragment answers 302 for a name it has no page for, while a
+    challenge shell answers a direct 200. A direct 200 small shell must
+    therefore stay inconclusive - it can never be reported as free.
+    """
+    shell = _fragment_absent()
+    client = PublicVerdictClient(enabled=True)
+    client._session = _FakeSession(  # noqa: SLF001 - test seam
+        {"shellup": _profile_placeholder("shellup")}, {}
+    )
+    # Serve the shell as a direct 200 with no redirect trail - exactly how a
+    # challenge page answers, unlike Fragment's own 302-then-shell.
+    client._session.get = lambda url, allow_redirects=True: (  # noqa: SLF001
+        _Response(200, shell)
+        if url.startswith(pv.FRAGMENT_USERNAME_URL.split("{")[0])
+        else _Response(200, _profile_placeholder("shellup"))
+    )
+
+    verdict = await client.judge("shellup")
+    assert verdict.status != "free"
+    assert verdict.is_taken is False
+
+
 async def test_a_bare_placeholder_with_no_fragment_answer_is_never_free():
     """A dead Fragment must leave the verdict unknown, not optimistic."""
     client = await _client({"x9k2qq": _profile_placeholder("x9k2qq")}, {})
@@ -150,7 +190,7 @@ async def test_the_size_limit_sits_in_the_empty_gap_between_the_bands():
     """The threshold separates "Fragment has a page" from "it does not".
 
     Measured: free/no-page bodies stay at or below ~18.8 KB, and a real page
-    starts at 26.5 KB, so anything either side of the 22 KB limit is far from
+    starts at 26.5 KB, so anything either side of the size limit is far from
     template jitter. This pins the direction of the comparison: just above is a
     page, just below is not.
     """

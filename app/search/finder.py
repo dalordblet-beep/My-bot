@@ -977,32 +977,59 @@ class UsernameFinder:
         if stocked is not None:
             return stocked
 
-        # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
-        # In unlimited mode a flat ``min(500, budget)`` *was* the whole budget,
-        # which left the guarantee pass with nothing to spend and ended searches
-        # in "everything is taken" while free coinages were still out there - the
-        # reservation below is what keeps the second pass funded.
-        if high:
-            valuable_budget = min(max(VALUABLE_CONFIRM_BUDGET, budget // 4), budget)
-        else:
-            valuable_budget = min(VALUABLE_CONFIRM_BUDGET, budget)
-        stopped = await self._sweep(
-            self._candidates(criteria), valuable_budget, state, progress, "valuable", screen_cap
-        )
-        if stopped is not None:
-            return stopped
-
-        # Pass 2: the guarantee. Whatever budget is left goes to the stream that
-        # is effectively always free, so the search ends on a name, not an excuse.
-        # It screens with its own, larger allowance - screening is free and is
-        # what lets the guarantee find a free coinage without touching MTProto.
-        if state.confirmations < budget:
+        # Short names (5-6 letters) take a different route. Real words at that
+        # length are essentially all taken, and the taken ones that carry no
+        # t.me card survive screening - so the valuable pass used to burn its
+        # confirmation budget (and the wall clock) on beautiful survivors while
+        # the guarantee stream, the only place a free short name lives, never
+        # got its turn. So a short search leads with the public guarantee hunt:
+        # fast, quota-free, and pointed at the stream where free short names
+        # actually exist.
+        if criteria.length is not None and criteria.length <= SHORT_NAME_LENGTH:
+            logger.info(
+                "short name (len=%s) - leading with the public guarantee hunt",
+                criteria.length,
+            )
+            attempt = await self._public_only_search(criteria, progress, state)
+            if attempt.hit:
+                return attempt
+            # The public pages could not settle anything (network down, source
+            # disabled). The session is the only channel left - spend the whole
+            # budget on the guarantee stream and skip the valuable pass: at
+            # this length it would only fund confirmations of taken names.
             stopped = await self._sweep(
                 self._guarantee_candidates(criteria), budget, state, progress,
                 "guarantee", guarantee_cap,
             )
             if stopped is not None:
                 return stopped
+        else:
+            # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
+            # In unlimited mode a flat ``min(500, budget)`` *was* the whole budget,
+            # which left the guarantee pass with nothing to spend and ended searches
+            # in "everything is taken" while free coinages were still out there - the
+            # reservation below is what keeps the second pass funded.
+            if high:
+                valuable_budget = min(max(VALUABLE_CONFIRM_BUDGET, budget // 4), budget)
+            else:
+                valuable_budget = min(VALUABLE_CONFIRM_BUDGET, budget)
+            stopped = await self._sweep(
+                self._candidates(criteria), valuable_budget, state, progress, "valuable", screen_cap
+            )
+            if stopped is not None:
+                return stopped
+
+            # Pass 2: the guarantee. Whatever budget is left goes to the stream that
+            # is effectively always free, so the search ends on a name, not an excuse.
+            # It screens with its own, larger allowance - screening is free and is
+            # what lets the guarantee find a free coinage without touching MTProto.
+            if state.confirmations < budget:
+                stopped = await self._sweep(
+                    self._guarantee_candidates(criteria), budget, state, progress,
+                    "guarantee", guarantee_cap,
+                )
+                if stopped is not None:
+                    return stopped
 
         # The hunt found names that look free but whose claimability could not
         # be proven (gate unavailable). They are never presented as results -

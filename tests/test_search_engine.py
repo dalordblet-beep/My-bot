@@ -908,6 +908,21 @@ async def test_finder_returns_a_free_name_when_every_word_is_taken(bot, monkeypa
     checker.confirm_availability = confirm
     finder = UsernameFinder(checker, None, rng=random.Random(3))
 
+    # Short lengths (5-6) lead with the public path now, so the public pages
+    # must agree with the same reality the MTProto mock encodes: taken names
+    # leave a public trace, clean coinages leave none. With that, the public
+    # route is what proves the "quickly" half of the promise for 5-6 letters.
+    from app.telegram.public_verdict import PublicVerdict
+
+    async def agree_with_reality(self, name: str) -> PublicVerdict:
+        if taken(name):
+            return PublicVerdict("occupied", "public_profile_card")
+        return PublicVerdict("free", "no_public_trace_anywhere")
+
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", agree_with_reality
+    )
+
     for length in (5, 6, 8, None):
         attempt = await finder.find_one(SearchCriteria(length=length))
         assert attempt.hit is True, f"length={length}: gave up with {attempt.reason}"

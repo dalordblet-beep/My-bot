@@ -33,17 +33,21 @@ What each source can and cannot say (all measured live, 8 October 2026)
   name's own page (it is in its catalogue) even though it is not a live listing.
   This is where an *unassignable* name lands - one that was once taken and is
   now in Telegram's release cooldown, or otherwise reserved. **Not claimable.**
-* ``<title>Fragment</title>`` with a small, near-constant body (~16.7-18.8 KB)
-  -> Fragment has **no page for this name at all**; it fell through to the
-  generic shell. Measured across 200+ random names: every single one landed in
-  this band, and not one occupied or reserved name ever did. This is the only
-  shape that means "nobody has ever claimed this" - i.e. genuinely **free**.
+* ``<title>Fragment</title>`` with a small, near-constant body (~16.7-18.8 KB),
+  reached through Fragment's own 302 redirect -> Fragment has **no page for
+  this name at all**; it fell through to the generic shell. Measured across
+  200+ random names: every single one landed in this band, and not one
+  occupied or reserved name ever did. This is the only shape that means
+  "nobody has ever claimed this" - i.e. genuinely **free**. The same small
+  body without a redirect trail is an anti-bot shell, and is treated as
+  unreadable, never as free.
 
 The size band is used **only** to separate "Fragment has a page for it" from
 "Fragment has no page for it", never as a quality judgement. The two bands are
 far apart and stable (free: 16.7-18.8 KB across 120 samples; reserved/listed:
-26.5 KB and up), so :data:`FRAGMENT_PAGE_SIZE_LIMIT` sits in the empty middle
-and the verdict is not a guess about a boundary case.
+26.5 KB and up), so :data:`FRAGMENT_PAGE_SIZE_LIMIT` sits inside the empty gap
+- low, to keep the 19-22 KB anti-bot shells out of the "no page" bin - and the
+verdict is not a guess about a boundary case.
 
 What this module does NOT do
 ----------------------------
@@ -73,9 +77,13 @@ FRAGMENT_USERNAME_URL = "https://fragment.com/username/{username}"
 #   * "no page for this name" (free)      - measured 16703..18756 across 120
 #     random names of length 5-8; every one landed here;
 #   * "Fragment has a page" (reserved)    - measured 26462 and up.
-# This limit sits in the empty gap, so a name is never mis-binned by a few bytes
-# of template jitter.
-FRAGMENT_PAGE_SIZE_LIMIT = 22000
+# The limit sits inside that empty gap - but low, not in the middle. Probes on
+# 9 October 2026 caught anti-bot shell pages at 19-22 KB (bare "Fragment"
+# title, no name page inside) which a mid-gap limit of 22000 misread as "no
+# page" - a false FREE, the one outcome this module refuses to emit. 19500
+# clears the whole measured absent band with room to spare and stays far
+# below every real page ever seen.
+FRAGMENT_PAGE_SIZE_LIMIT = 19500
 
 # ``<title>name – Fragment</title>`` (Fragment uses a non-breaking space). The
 # name itself is not needed - only whether the title is the bare word "Fragment".
@@ -216,6 +224,14 @@ class PublicVerdictClient:
         16734 bytes once followed; ``bapug`` -> 302 then 200 / 31956 bytes;
         ``pizza`` (listed) -> 200 straight away. Reading the 302 without
         following it throws away precisely the case this method exists for.
+
+        The redirect trail is also *proof*. Anti-bot / captcha shells are the
+        same small size and carry the same bare "Fragment" title as a genuine
+        no-page answer, so size and title alone cannot separate them. But a
+        real absent page is always reached through Fragment's own 302, while a
+        challenge shell answers a direct 200. Therefore "absent" requires a
+        non-empty ``response.history``; a direct 200 small shell returns
+        ``None`` - inconclusive, never free.
         """
         try:
             session = await self._get_session()
@@ -236,6 +252,12 @@ class PublicVerdictClient:
             return "listed"
         if size >= FRAGMENT_PAGE_SIZE_LIMIT:
             return "page"
+        # The small shell alone is not proof of absence: anti-bot shells are
+        # the same size with the same bare title. A genuine "no page" answer
+        # is Fragment's 302 whose target is this shell - so the redirect trail
+        # must be there. A direct 200 stays inconclusive; it can never be free.
+        if not response.history:
+            return None
         return "absent"
 
 
