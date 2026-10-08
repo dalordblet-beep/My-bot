@@ -213,7 +213,11 @@ async def clean_state(database, mock_session, captcha_service, dispatcher, page_
     mtproto_client._bot_clients = []
     mtproto_client._bot_turn = 0
     mtproto_client._main_cooldown = 0.0
-    mtproto_client._user_clients = []
+    # Tests deploy WITH a claimability gate: a properly configured bot has a
+    # user session, and the search refuses to run without one.
+    mtproto_client._user_clients = [
+        {"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}
+    ]
     mtproto_client._user_turn = 0
     yield
 

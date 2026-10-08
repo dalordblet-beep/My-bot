@@ -763,6 +763,13 @@ def find_result(lang: str, attempt, attempts_used: int) -> str:
 
 def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
     if not attempt.username:
+        if attempt.reason == "claim_unavailable":
+            # Claimability could not be verified (user session missing or
+            # rate-limited). Nothing is delivered rather than a false "free".
+            return (
+                f"{t(lang, 'search.result_title')}\n\n"
+                f"{t(lang, 'search.claim_unavailable', n=attempt.generated_tries)}"
+            )
         if attempt.reason == "all_taken":
             # Every candidate this good already has an owner. Never dress an
             # occupied name up as a result - explain and point at a trap.

@@ -46,6 +46,7 @@ from app.search.pattern import (
     rate,
 )
 from app.telegram.username_checker import UsernameChecker
+from app.telegram.mtproto import mtproto_client
 from app.services.runtime_config import runtime
 from app.utils.enums import CheckStatus, CollectibleStatus
 from app.utils.logging_setup import get_logger
@@ -114,12 +115,6 @@ VALUABLE_CONFIRM_BUDGET = 5
 # the progress screen exists precisely to make that wait bearable.
 SHORT_NAME_LENGTH = 6
 SHORT_NAME_CONFIRM_BUDGET = 30
-# When claimability cannot be verified (no user session, or its checkUsername
-# was rate-limited), an unoccupied name is *not* a provable win. The search
-# keeps hunting for a provable one and delivers the best unverified candidate
-# only after this many more confirmations - never silently, the result screen
-# carries the caveat.
-UNVERIFIED_GRACE = 5
 # If a FloodWait is longer than this, do not sit on it: a search the user is
 # waiting on must answer now and say "Telegram is throttling us", not hang.
 # A multi-minute wait is not a search, it is a stuck screen.
@@ -161,10 +156,9 @@ class _SweepState:
     best_premium: Premium | None = None
     # A name that resolves as unoccupied but whose claimability could not be
     # verified (no user session, or its checkUsername was rate-limited). It is
-    # never allowed to stop the search as a "win" right away - the run keeps
-    # hunting for a provable name and only falls back to this one at the end.
+    # never delivered as a result - if the hunt ends with only these, the run
+    # reports an honest "cannot verify" instead of a false "free".
     unverified_hit: "FindAttempt | None" = None
-    unverified_seen: int = 0
 
 
 @dataclass
@@ -427,15 +421,13 @@ class UsernameFinder:
                         name, basic, state, fragment_clear, fragment_checked
                     )
                     if getattr(basic, "detail", None) == "claimability_unverified":
-                        # "Nobody owns it" is proven, "Telegram will hand it
-                        # over" is not. Do not stop the run for this - keep
-                        # hunting for a provable name, and only fall back to
-                        # the best unverified candidate when the hunt is over.
+                        # Not a provable win: "nobody owns it" is proven, but
+                        # "Telegram will hand it over" is not. Keep hunting for
+                        # a verifiable name; unverifiable candidates are only
+                        # reported at the very end - as an honest "cannot
+                        # verify", never as a free result.
                         if state.unverified_hit is None:
                             state.unverified_hit = attempt
-                        state.unverified_seen += 1
-                        if state.unverified_seen >= UNVERIFIED_GRACE:
-                            return attempt
                         continue
                     return attempt
 
@@ -534,6 +526,20 @@ class UsernameFinder:
                 reason="throttled", generated_tries=0,
             )
 
+        # The claimability gate is the line between "nobody owns it" and
+        # "Telegram will actually hand it over". Without it every verdict would
+        # be unverifiable - exactly the false "free" this bot must never emit -
+        # so refuse to run rather than lie. Occupied names still get screened
+        # out for free by the public page whenever the user asks.
+        if not mtproto_client.user_ready:
+            logger.warning(
+                "search refused: no user session - claimability cannot be verified"
+            )
+            return FindAttempt(
+                username="", premium=premium_rating(""), hit=False,
+                reason="claim_unavailable", generated_tries=0,
+            )
+
         budget = self._confirm_budget(criteria)
 
         # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
@@ -556,12 +562,19 @@ class UsernameFinder:
             if stopped is not None:
                 return stopped
 
-        # Nothing provably free within the budget. If an unverified candidate
-        # was found along the way (claimability could not be checked), it is
-        # still the best answer - delivered with its loud caveat on the result
-        # screen, never dressed up as a guaranteed win.
+        # The hunt found names that look free but whose claimability could not
+        # be proven (gate unavailable). They are never presented as results -
+        # the honest answer is that verification is down, not a fake "free".
         if state.unverified_hit is not None:
-            return state.unverified_hit
+            logger.warning(
+                "search ended without a verifiable name after %d screened - "
+                "claimability gate unavailable",
+                state.screened,
+            )
+            return FindAttempt(
+                username="", premium=premium_rating(""), hit=False,
+                reason="claim_unavailable", generated_tries=state.screened,
+            )
 
         # Nothing free within the budget. Report honestly why the search stopped
         # - and never present an occupied name as a successful result.
@@ -667,6 +680,10 @@ class UsernameFinder:
                     throttled = True
                     break
                 if basic.status is CheckStatus.AVAILABLE:
+                    if getattr(basic, "detail", None) == "claimability_unverified":
+                        # Unverifiable claimability is never listed as a free
+                        # alternative - same rule as the main search.
+                        continue
                     # Same double check as a free search: Fragment listings veto.
                     fragment_clear, fragment_checked = await self._fragment_verdict(name)
                     if not fragment_clear:

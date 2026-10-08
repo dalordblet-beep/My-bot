@@ -451,6 +451,15 @@ EN: dict[str, str] = {
     ),
     "search.fragment_ok": "{check} Fragment: not listed for sale or auction",
     "search.fragment_off": "{warn} Fragment: could not be checked (marketplace off)",
+    "search.claim_unavailable": (
+        "{warn} <b>CANNOT VERIFY CLAIMABILITY RIGHT NOW</b>\n\n"
+        "I screened <b>{n}</b> names and some looked free - but the session that "
+        "proves a name can actually be claimed is missing or rate-limited by "
+        "Telegram. Rather than hand you a name you might not be able to take, "
+        "I stop here.\n\n"
+        "{info} <i>Occupied names are still screened out. The search returns "
+        "once claimability checking is back.</i>"
+    ),
     "search.claim_unverified": (
         "{warn} Claimability not verified (no user session here) - Telegram may "
         "still refuse this name. See the FAQ / ask support."
@@ -1317,6 +1326,15 @@ RU: dict[str, str] = {
     ),
     "search.fragment_ok": "{check} Fragment: не выставлено на продажу или аукцион",
     "search.fragment_off": "{warn} Fragment: проверить не удалось (маркетплейс выключен)",
+    "search.claim_unavailable": (
+        "{warn} <b>НЕ МОГУ ПРОВЕРИТЬ ЗАНЯТИЕ ПРЯМО СЕЙЧАС</b>\n\n"
+        "Я проверил <b>{n}</b> имён — некоторые выглядели свободными, но сессия, "
+        "подтверждающая, что имя реально можно занять, отсутствует или "
+        "ограничена Telegram. Я не буду выдавать имя, которое потом нельзя "
+        "занять.\n\n"
+        "{info} <i>Занятые имена по-прежнему отсекаются. Поиск вернётся, как "
+        "только проверка занятия восстановится.</i>"
+    ),
     "search.claim_unverified": (
         "{warn} Возможность занятия не проверена (здесь нет user-сессии) — "
         "Telegram может всё равно не отдать это имя."

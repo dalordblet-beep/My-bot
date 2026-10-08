@@ -39,6 +39,7 @@ async def main() -> int:
             UsernameNotOccupiedError,
             UsernameOccupiedError,
         )
+        from telethon.tl.functions.account import CheckUsernameRequest
         from telethon.tl.functions.contacts import ResolveUsernameRequest
     except Exception:
         print("telethon is not installed - run pip install -r requirements.txt")
@@ -93,7 +94,56 @@ async def main() -> int:
                 except Exception:
                     pass
 
-    print(f"\n{ok}/{len(tokens)} session(s) ready")
+    print(f"\n{ok}/{len(tokens)} bot session(s) ready")
+
+    # ---------------------------------------------------------- user session
+    # The claimability gate: without it occupied/reserved/cooldown names get
+    # reported as free. Report exactly what a deployment is missing.
+    from app.telegram import mtproto as mtproto_module
+
+    user_found = False
+    for name in settings.user_session_names:
+        if not name:
+            continue
+        path = mtproto_module._session_file(name)
+        if not path.exists():
+            continue
+        client = None
+        try:
+            client = TelegramClient(str(path), settings.api_id, settings.api_hash)
+            await client.connect()
+            if not await client.is_user_authorized():
+                print(f"[user:{path}] NOT authorised - re-login required")
+                continue
+            me = await client.get_me()
+            handle = getattr(me, "username", None) or "?"
+            try:
+                verdict = await client(CheckUsernameRequest(args.username))
+                gate = "CLAIMABLE" if verdict else "unassignable/occupied"
+            except UsernameInvalidError:
+                gate = "unassignable (USERNAME_INVALID)"
+            except FloodWaitError as exc:
+                gate = f"FLOOD WAIT {exc.seconds}s - gate temporarily down"
+            print(f"[user:{path}] @{handle} -> '{args.username}': {gate}  OK")
+            user_found = True
+        except Exception as exc:
+            print(f"[user:{path}] FAILED: {type(exc).__name__}: {exc}")
+        finally:
+            if client is not None:
+                try:
+                    await client.disconnect()
+                except Exception:
+                    pass
+
+    if user_found:
+        print("claimability gate: ON")
+    else:
+        print(
+            "claimability gate: OFF - no user session found! This is why "
+            "occupied/reserved names get reported as free. Copy "
+            f"{settings.user_session_names[0]}.session next to the code and "
+            "restart."
+        )
     return 0 if ok == len(tokens) else 1
 
 

@@ -80,10 +80,10 @@ async def test_check_username_true_means_verified(monkeypatch):
 
 
 # -------------------------------------------------------------------- finder
-async def test_unverified_hit_does_not_stop_the_search(monkeypatch):
-    """An unverifiable name is not a win: the run keeps hunting for proof."""
+async def test_unverified_names_are_never_delivered_as_results(monkeypatch):
+    """When claimability cannot be verified, the run says so instead of
+    inventing a "free" name - the exact failure the user kept hitting."""
     monkeypatch.setattr(settings_, "allow_bot_api_availability", True)
-    monkeypatch.setattr(finder_module, "UNVERIFIED_GRACE", 3)
 
     checker = UsernameChecker(
         cache=None, bot=None, page_probe=FakePageProbe(state="free")
@@ -98,13 +98,12 @@ async def test_unverified_hit_does_not_stop_the_search(monkeypatch):
     checker.confirm_availability = unverified
     attempt = await UsernameFinder(checker, None).find_one(SearchCriteria(length=8))
 
-    # The search spent the whole budget hunting instead of stopping at the
-    # very first unverifiable name...
+    # The run kept hunting (it did not stop at the first unverifiable name)...
     assert confirmed > 1
-    # ...and in the end delivered the best unverified candidate - with the
-    # caveat riding on the result, not a silent "guaranteed free".
-    assert attempt.hit is True
-    assert attempt.basic.detail == "claimability_unverified"
+    # ...and in the end refused to invent a result: no username, honest reason.
+    assert attempt.hit is False
+    assert attempt.username == ""
+    assert attempt.reason == "claim_unavailable"
 
 
 async def test_verified_hit_stops_the_search_immediately(monkeypatch):
@@ -125,6 +124,31 @@ async def test_verified_hit_stops_the_search_immediately(monkeypatch):
 
     assert attempt.hit is True
     assert confirmed == 1
+
+
+async def test_search_refuses_to_run_without_the_claimability_gate():
+    """No user session -> no search at all: every verdict would be a guess."""
+    from app.telegram import mtproto as mtproto_module
+
+    checker = UsernameChecker(
+        cache=None, bot=None, page_probe=FakePageProbe(state="free")
+    )
+    finder = UsernameFinder(checker, None)
+
+    async def broken_confirm(name):  # must never be reached
+        raise AssertionError("the search must refuse before confirming anything")
+
+    checker.confirm_availability = broken_confirm
+    saved = mtproto_module.mtproto_client._user_clients
+    mtproto_module.mtproto_client._user_clients = []
+    try:
+        attempt = await finder.find_one(SearchCriteria(length=8))
+    finally:
+        mtproto_module.mtproto_client._user_clients = saved
+
+    assert attempt.hit is False
+    assert attempt.reason == "claim_unavailable"
+    assert attempt.generated_tries == 0
 
 
 async def test_result_screen_carries_the_caveat():
