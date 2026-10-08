@@ -315,3 +315,29 @@ class FreeName(Base):
     served_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+
+class JoinRequest(Base):
+    """A user's *unapproved* request to join a private channel or chat.
+
+    The onboarding gate treats "subscribed" as "may use the bot". A private
+    channel approves requests by hand, and approval does not always happen
+    immediately - so a user who has already sent a request is genuinely on their
+    way in, and leaving them stuck on the gate is punishing them for the admin's
+    queue. Telegram pushes these requests to the bot (``chat_join_request``), so
+    they are remembered here and counted as a subscription.
+
+    Rows are keyed by the pair and carry a timestamp: an old request that was
+    never approved (or was declined) must not keep granting access for ever.
+    """
+
+    __tablename__ = "join_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    chat_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    user_id: Mapped[int] = mapped_column(BigInteger, index=True)
+    requested_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("chat_id", "user_id", name="uq_join_request_chat_user"),
+    )

@@ -31,6 +31,11 @@ _PACE_DECAY_SECONDS = 600.0
 _PACE_MULTIPLIER_CAP = 16.0
 _PACE_BASE_MARGIN = 2.0
 
+# How many pending join requests to read in one page when checking whether a
+# specific user is in the queue. The queue of a channel that approves by hand is
+# short; a page this wide covers it without paging.
+JOIN_REQUEST_SCAN_LIMIT = 100
+
 
 def _session_file(name: str, root: Path | None = None) -> Path:
     """Locate a session file: working directory first, then the project root.
@@ -64,7 +69,8 @@ try:  # Telethon is a hard requirement, but import errors must not crash boot.
     from telethon.tl.functions.account import CheckUsernameRequest
     from telethon.tl.functions.contacts import ResolveUsernameRequest
     from telethon.tl.functions.fragment import GetCollectibleInfoRequest
-    from telethon.tl.types import Channel, Chat, InputCollectibleUsername
+    from telethon.tl.functions.messages import GetChatInviteImportersRequest
+    from telethon.tl.types import Channel, Chat, InputCollectibleUsername, InputUserEmpty
     from telethon.tl.types import User as TgUser
 
     TELETHON_AVAILABLE = True
@@ -459,6 +465,21 @@ class MtprotoClient:
                 )
                 found += 1
             except Exception as exc:
+                cls = type(exc).__name__
+                if "AuthKeyDuplicated" in cls:
+                    # Telegram invalidated the key because the same session file
+                    # was used from two IP addresses at once. The file is dead
+                    # for good, and retrying it will never work - so say exactly
+                    # what to do rather than leaving the gate silently off.
+                    logger.error(
+                        "user session %s was invalidated by Telegram (the same "
+                        "session file was used from two different IP addresses). "
+                        "It cannot be reused - delete %s and log in again:\n"
+                        "  python scripts/login_user_steps.py send <phone>\n"
+                        "  python scripts/login_user_steps.py sign <code>",
+                        name, path,
+                    )
+                    continue
                 logger.warning("could not start user session %s: %s", name, exc)
 
         if found:
@@ -528,6 +549,86 @@ class MtprotoClient:
                 except Exception as exc:
                     logger.debug("checkUsername(%s) via %s failed: %s", username, entry["name"], exc)
                     continue
+        return None
+
+    async def join_request_pending(self, chat_id: int, user_id: int) -> bool | None:
+        """True when ``user_id`` has an *unapproved* request to join ``chat_id``.
+
+        A private channel approves requests by hand, so "not a member yet" and
+        "has not asked to join" are very different things - and only the second
+        one should keep a user out of the bot. This reads the request queue
+        itself, which is the authoritative answer even for requests sent while
+        the bot was offline or before it was an administrator.
+
+        ``messages.getChatInviteImporters`` is refused to bots outright
+        (``BotMethodInvalidError`` - verified live, exactly like
+        ``account.checkUsername``), so it runs on the **user** session pool. That
+        account must be an administrator of the chat; without it the call fails
+        and the caller falls back to the request Telegram pushed to the bot.
+
+        Returns ``None`` when no session could answer - never a guess, because a
+        guess here would either lock a subscriber out or let a stranger in.
+        """
+        ready = [entry for entry in self._user_clients if entry["ready"]]
+        if not ready:
+            return None
+
+        # The user-only calls share one safe pace across the pool.
+        self._user_limiter.min_interval = max(
+            1.0, settings.request_delay / len(ready)
+        )
+
+        now = asyncio.get_event_loop().time()
+        order = ready[self._user_turn % len(ready):] + ready[: self._user_turn % len(ready)]
+        self._user_turn += 1
+
+        for entry in order:
+            if entry["cooldown_until"] > now:
+                continue
+            async with self._lock:
+                await self._user_limiter.acquire()
+                try:
+                    peer = await entry["client"].get_input_entity(chat_id)
+                    result = await entry["client"](
+                        GetChatInviteImportersRequest(
+                            peer=peer,
+                            offset_date=None,
+                            offset_user=InputUserEmpty(),
+                            limit=JOIN_REQUEST_SCAN_LIMIT,
+                            requested=True,
+                        )
+                    )
+                except FloodWaitError as exc:  # pragma: no cover - network dependent
+                    wait = float(getattr(exc, "seconds", 60) or 60)
+                    entry["cooldown_until"] = now + wait
+                    logger.warning(
+                        "join request lookup: session %s flood wait %ss - parked",
+                        entry["name"], int(wait),
+                    )
+                    continue
+                except Exception as exc:
+                    cls = type(exc).__name__
+                    if "FloodWait" in cls:
+                        wait = float(getattr(exc, "seconds", 60) or 60)
+                        entry["cooldown_until"] = now + wait
+                        logger.warning(
+                            "join request lookup: session %s flood wait %ss - parked",
+                            entry["name"], int(wait),
+                        )
+                        continue
+                    # Not an administrator, wrong chat id, chat has no request
+                    # queue - none of which may be read as "no request".
+                    logger.debug(
+                        "join request lookup(%s) via %s failed: %s",
+                        chat_id, entry["name"], exc,
+                    )
+                    return None
+
+                importers = getattr(result, "importers", None) or []
+                for importer in importers:
+                    if getattr(importer, "user_id", None) == user_id:
+                        return True
+                return False
         return None
 
     def _park(self, name: str, wait: float) -> None:

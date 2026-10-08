@@ -24,7 +24,10 @@ logger = get_logger(__name__)
 
 def extract_from_user(event: TelegramObject):
     if isinstance(event, Update):
-        for field in ("message", "callback_query", "inline_query", "chat_member", "my_chat_member"):
+        for field in (
+            "message", "callback_query", "inline_query", "chat_member",
+            "my_chat_member", "chat_join_request",
+        ):
             nested = getattr(event, field, None)
             if nested is not None:
                 return getattr(nested, "from_user", None)

@@ -21,7 +21,8 @@ from app.config import settings
 from app.database import repository as repo
 from app.database.models import User
 from app.services.subscriptions import RequiredSub, required_subs
-from app.telegram.bot_api import build_chat_ref, get_membership
+from app.telegram.bot_api import build_chat_ref, get_membership, lookup_chat
+from app.telegram.mtproto import mtproto_client
 from app.utils.enums import (
     Privilege,
     Permission,
@@ -193,6 +194,14 @@ class AccessGuard:
             ref = build_chat_ref(sub.chat_id, sub.username)
             status = await get_membership(bot, ref, user.telegram_id)
             joined = status.grants_access
+
+            # Not a member - but a private channel approves requests by hand, and
+            # the approval queue is not the user's fault. Somebody who has already
+            # asked to join has done their part, so a *pending* request counts as
+            # a subscription instead of leaving them stuck on the gate.
+            if not joined:
+                joined = await self.join_request_pending(session, bot, sub, user)
+
             results[sub.key] = joined
 
             stored = repo.sub_verified_at(user, sub.key)
@@ -208,6 +217,47 @@ class AccessGuard:
 
         self._membership_cache[user.telegram_id] = (now, results)
         return results
+
+    async def join_request_pending(
+        self, session: AsyncSession, bot: Bot, sub: RequiredSub, user: User
+    ) -> bool:
+        """Does this user have an unapproved request to join ``sub``?
+
+        Two sources, cheapest and most certain first:
+
+        * the request Telegram pushed to the bot (``chat_join_request``), which is
+          instant and needs nothing but the bot being an administrator;
+        * the request queue itself, read with the user session - this is what
+          covers a request sent while the bot was offline, or before this feature
+          existed.
+
+        Both are "not proven" when they cannot answer: a failure here must never
+        be read as "the request exists", or a stranger would be let in.
+        """
+        chat_id = sub.chat_id
+        if not chat_id:
+            # Only a @username is configured. Resolve it once so the record can
+            # be keyed the same way the update keys it.
+            lookup = await lookup_chat(bot, build_chat_ref(0, sub.username))
+            chat_id = int(lookup.chat_id or 0) if lookup.found else 0
+        if not chat_id:
+            return False
+
+        if await repo.has_join_request(
+            session, chat_id, user.telegram_id, settings.join_request_ttl
+        ):
+            return True
+
+        pending = await mtproto_client.join_request_pending(chat_id, user.telegram_id)
+        if pending:
+            # Remember it so the next check does not need the queue again.
+            await repo.record_join_request(session, chat_id, user.telegram_id)
+            logger.info(
+                "join request found for user %s in chat %s - access granted",
+                user.telegram_id, chat_id,
+            )
+            return True
+        return False
 
     def invalidate(self, telegram_id: int) -> None:
         self._membership_cache.pop(telegram_id, None)

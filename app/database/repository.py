@@ -14,6 +14,7 @@ from app.database.models import (
     BotSetting,
     Favorite,
     FreeName,
+    JoinRequest,
     PortfolioItem,
     Search,
     Trap,
@@ -938,4 +939,57 @@ async def prune_free_names(session: AsyncSession, older_than_seconds: int) -> in
     """Drop stale rows. A free name can be claimed by anyone at any moment."""
     cutoff = utcnow() - timedelta(seconds=max(0, older_than_seconds))
     result = await session.execute(delete(FreeName).where(FreeName.verified_at < cutoff))
+    return int(result.rowcount or 0)
+
+
+# ---------------------------------------------------------------- join requests
+# A pending request to join a private channel counts as a subscription: the user
+# has done their part, the approval queue is not their fault. See the model.
+async def record_join_request(session: AsyncSession, chat_id: int, user_id: int) -> None:
+    """Remember (or refresh) a user's request to join ``chat_id``."""
+    result = await session.execute(
+        select(JoinRequest).where(
+            JoinRequest.chat_id == chat_id, JoinRequest.user_id == user_id
+        )
+    )
+    row = result.scalar_one_or_none()
+    if row is None:
+        session.add(JoinRequest(chat_id=chat_id, user_id=user_id))
+    else:
+        # Telegram re-sends a request when the user asks again - keep it fresh,
+        # so a genuine re-request restarts the trust window.
+        row.requested_at = utcnow()
+    await session.flush()
+
+
+async def has_join_request(
+    session: AsyncSession, chat_id: int, user_id: int, ttl_seconds: int
+) -> bool:
+    """True when a request from ``user_id`` is still within its trust window."""
+    cutoff = utcnow() - timedelta(seconds=max(0, ttl_seconds))
+    result = await session.execute(
+        select(JoinRequest.id).where(
+            JoinRequest.chat_id == chat_id,
+            JoinRequest.user_id == user_id,
+            JoinRequest.requested_at >= cutoff,
+        )
+    )
+    return result.scalar_one_or_none() is not None
+
+
+async def clear_join_request(session: AsyncSession, chat_id: int, user_id: int) -> None:
+    """Forget a request - it was approved (now a member) or declined."""
+    await session.execute(
+        delete(JoinRequest).where(
+            JoinRequest.chat_id == chat_id, JoinRequest.user_id == user_id
+        )
+    )
+
+
+async def prune_join_requests(session: AsyncSession, older_than_seconds: int) -> int:
+    """Drop requests that were never approved, so they stop granting access."""
+    cutoff = utcnow() - timedelta(seconds=max(0, older_than_seconds))
+    result = await session.execute(
+        delete(JoinRequest).where(JoinRequest.requested_at < cutoff)
+    )
     return int(result.rowcount or 0)

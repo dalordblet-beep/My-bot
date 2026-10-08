@@ -405,6 +405,35 @@ Add the bot as an **administrator** of every channel and an **administrator of
 supergroups** — otherwise Telegram refuses `getChatMember` and the gate cannot
 be verified.
 
+#### Pending join requests count as a subscription
+
+A **private** channel approves join requests by hand, and approval does not
+always happen immediately. Waiting for a human to tap Approve would leave a user
+who has already done their part stuck on the gate — so a **pending request is
+treated as a subscription** and lets them through.
+
+Two sources, cheapest and most certain first:
+
+1. **The update Telegram pushes to the bot.** When the bot is an administrator
+   of the channel it receives `chat_join_request`, which is remembered in the
+   `join_requests` table. This needs nothing but admin rights and is instant.
+2. **The request queue itself**, read over MTProto. This is what covers a request
+   sent while the bot was offline (startup drops pending updates), or before this
+   feature existed. Note that `messages.getChatInviteImporters` is refused to
+   **bots** outright (`BotMethodInvalidError`, verified live), so this runs on
+   the **user session** — the same login the claimability gate uses — and that
+   account has to be an administrator of the channel.
+
+Run `python scripts/check_join_requests.py` to see whether the user session can
+read each channel's request queue, and how many requests are waiting.
+
+The click is never trusted on its own: every gate check re-reads the record (and
+the queue, when it can) rather than believing a button. A failure to read is
+never read as "the request exists", or a stranger would be let in. A request
+that is never approved — or is declined — stops counting after
+`JOIN_REQUEST_TTL` (default 24 h); lower it if your admins decline requests and
+you want a declined request to expire sooner.
+
 When `REQUIRED_SUBSCRIPTIONS` is empty, the legacy pair below is used instead,
 so an existing `.env` keeps working unchanged. Leave everything empty to skip
 the step entirely.

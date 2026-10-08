@@ -111,6 +111,11 @@ class Settings(BaseSettings):
     max_captcha_attempts: int = 3
     # How long a proven channel/chat membership is trusted before re-checking.
     membership_recheck_ttl: int = 300
+    # How long an *unapproved* join request counts as a subscription. Private
+    # channels approve by hand and the queue is not the user's fault, so somebody
+    # who has already asked to join is let in - but a request that was never
+    # approved (or was declined) must not grant access for ever.
+    join_request_ttl: int = 86400
 
     # --- scanning ---------------------------------------------------------
     max_search_results: int = 500
