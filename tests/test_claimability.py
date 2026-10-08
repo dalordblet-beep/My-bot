@@ -216,19 +216,33 @@ async def test_verified_hit_stops_the_search_immediately(monkeypatch):
     assert confirmed == 1
 
 
-async def test_search_refuses_to_run_without_the_claimability_gate():
-    """No user session -> no search at all: every verdict would be a guess."""
+async def test_search_without_the_claimability_gate_answers_from_public_pages(monkeypatch):
+    """No user session -> the search still runs, but only on public sources.
+
+    The old behaviour was to refuse and tell the user the search could not run -
+    an excuse. The gate still matters (it is the only way to *prove* claimability)
+    but its absence no longer stops a search: the run falls back to the
+    session-free classifier, which answers with a real name and labels the
+    verdict ``public`` rather than pretending Telegram confirmed it.
+    """
     from app.telegram import mtproto as mtproto_module
+    from app.telegram.public_verdict import PublicVerdict
 
     checker = UsernameChecker(
         cache=None, bot=None, page_probe=FakePageProbe(state="free")
     )
     finder = UsernameFinder(checker, None)
 
-    async def broken_confirm(name):  # must never be reached
-        raise AssertionError("the search must refuse before confirming anything")
+    async def broken_confirm(name):  # must never be reached on the public path
+        raise AssertionError("the public path must not open a MTProto session")
+
+    async def fake_judge(self, username):
+        return PublicVerdict("free", "no_public_trace_anywhere")
 
     checker.confirm_availability = broken_confirm
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", fake_judge
+    )
     saved = mtproto_module.mtproto_client._user_clients
     mtproto_module.mtproto_client._user_clients = []
     try:
@@ -236,9 +250,12 @@ async def test_search_refuses_to_run_without_the_claimability_gate():
     finally:
         mtproto_module.mtproto_client._user_clients = saved
 
-    assert attempt.hit is False
-    assert attempt.reason == "claim_unavailable"
-    assert attempt.generated_tries == 0
+    # A real name, honestly labelled as having come from public sources.
+    assert attempt.hit is True
+    assert attempt.username != ""
+    assert attempt.public_confidence == "public"
+    assert attempt.basic.source == "public_verdict"
+    assert attempt.basic.detail == "claimability_unverified"
 
 
 async def test_result_screen_carries_the_caveat():

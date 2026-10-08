@@ -459,25 +459,44 @@ async def test_repeat_search_reuses_verdicts_instead_of_re_probing(bot):
     assert checker.verdicts.hits > 0
 
 
-async def test_finder_aborts_immediately_on_a_long_flood_wait(bot):
-    """A multi-hour FloodWait must not freeze the search screen."""
+async def test_finder_answers_from_public_pages_on_a_long_flood_wait(bot, monkeypatch):
+    """A multi-hour FloodWait must not freeze the screen - and must not be an excuse.
+
+    A parked session used to end the run with "Telegram is limiting us", which is
+    an excuse, not an answer. The search now falls back to the session-free
+    public path: it screens and classifies from ``t.me`` + ``fragment.com``, so a
+    user with a dead session still gets a real name (or a real "everything here
+    is taken"), never a bare throttle notice.
+    """
     from app.utils.ratelimit import RateLimiter
+    from app.telegram.public_verdict import PublicVerdict
 
     limiter = RateLimiter(min_interval=0.0)
     limiter.pause(20702.0)  # what a real Telegram ban looked like
     checker = UsernameChecker(
         cache=None, bot=bot, rate_limiter=limiter, page_probe=FakePageProbe(state="free")
     )
+
+    # The public path must be exercised without touching the network here, so it
+    # is stubbed to answer "free" for the candidate it is asked about.
+    async def fake_judge(self, username):
+        return PublicVerdict("free", "no_public_trace_anywhere")
+
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", fake_judge
+    )
+
     finder = UsernameFinder(checker, None)
 
     attempt = await asyncio.wait_for(
         finder.find_one(SearchCriteria(length=6)), timeout=5
     )
 
-    # It must answer at once, say it was throttled, and not claim a result.
-    assert attempt.reason == "throttled"
-    assert attempt.hit is False
-    assert attempt.username == ""
+    # It answers at once, with a real name, and says the verdict came from the
+    # public path rather than pretending Telegram confirmed it.
+    assert attempt.hit is True
+    assert attempt.username != ""
+    assert attempt.public_confidence == "public"
 
 
 async def test_finder_waits_out_a_throttle_instead_of_giving_up(bot, monkeypatch):

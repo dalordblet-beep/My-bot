@@ -48,6 +48,7 @@ from app.search.pattern import (
 )
 from app.telegram.username_checker import UsernameChecker
 from app.telegram.mtproto import mtproto_client
+from app.telegram.public_verdict import PublicVerdict, public_verdict_client
 from app.services.runtime_config import runtime
 from app.utils.enums import CheckStatus, CollectibleStatus
 from app.utils.logging_setup import get_logger
@@ -215,6 +216,13 @@ class FindAttempt:
     # the screen says so instead of claiming a verification that never ran.
     fragment_clear: bool = False
     fragment_checked: bool = False
+    # Set only when the name was classified by the no-session public path
+    # (``app/telegram/public_verdict.py``) after Telegram's own channels were
+    # unreachable. ``confidence="public"`` tells the result screen to say how
+    # the verdict was reached - it is a real answer about a real name, but it is
+    # not Telegram's own word, and the screen never pretends otherwise.
+    public_confidence: str | None = None
+    public_reason: str | None = None
 
 
 class UsernameFinder:
@@ -420,6 +428,69 @@ class UsernameFinder:
                 progress("waiting", snapshot[0], snapshot[1], snapshot[2])
         await asyncio.sleep(wait)
         return True
+
+    async def _public_fallback(
+        self, state: "_SweepState", progress=None
+    ) -> FindAttempt | None:
+        """Answer from public pages when Telegram's own channels are down.
+
+        This is the no-session path: ``t.me`` plus ``fragment.com``, both plain
+        public URLs with no account behind them, so they cannot be FloodWaited
+        the way a session can. Nothing here invents a name - it re-checks the
+        *best* candidate the search already screened and reports what the public
+        pages say about it.
+
+        Returns ``None`` when the public pages cannot settle the question either,
+        in which case the caller keeps its original, honest verdict.
+        """
+        if state.best is None:
+            return None
+
+        name = state.best
+        try:
+            verdict: PublicVerdict = await public_verdict_client.judge(name)
+        except Exception as exc:  # a dead public source must not kill the search
+            logger.debug("public fallback failed for %s: %s", name, exc)
+            return None
+
+        if verdict.status not in ("free", "occupied"):
+            # "reserved" or "unknown" - the public pages did not settle it, and
+            # this path only ever answers with something it can stand behind.
+            return None
+
+        if progress is not None:
+            with contextlib.suppress(Exception):
+                progress("public", state.confirmations, state.budget or 1, state.screened)
+
+        logger.info(
+            "public fallback: @%s -> %s (%s)", name, verdict.status, verdict.reason
+        )
+        if verdict.status == "free":
+            # A real name, verified as trace-free on both public pages. Not
+            # claimable-proven (only a user session can do that), so it carries
+            # the same caveat as any unverified hit - but it IS a real answer
+            # about a real name instead of a bare "Telegram is limiting us".
+            basic = CheckResult(
+                username=name,
+                status=CheckStatus.AVAILABLE,
+                source="public_verdict",
+                detail="claimability_unverified",
+            )
+            attempt = await self._hit_attempt(
+                name, basic, state, fragment_clear=True, fragment_checked=True
+            )
+            attempt.public_confidence = verdict.confidence
+            attempt.public_reason = verdict.reason
+            return attempt
+        return FindAttempt(
+            username=name,
+            premium=state.best_premium or premium_rating(""),
+            hit=False,
+            reason="all_taken",
+            generated_tries=state.screened,
+            public_confidence=verdict.confidence,
+            public_reason=verdict.reason,
+        )
 
     def _guarantee_candidates(self, criteria: SearchCriteria) -> Iterator[str]:
         """The guarantee stream: names that are actually still free.
@@ -695,6 +766,81 @@ class UsernameFinder:
             fragment_checked=fragment_checked,
         )
 
+    async def _public_only_search(
+        self, criteria: SearchCriteria, progress, state: "_SweepState"
+    ) -> FindAttempt:
+        """Answer without any Telegram session at all.
+
+        This is the path that runs when every session is FloodWait-parked or no
+        user session exists. It does exactly what the session path does for
+        screening - the same candidate stream, the same public-page screen, the
+        same taste gates - but the final verdict comes from
+        :mod:`app.telegram.public_verdict` instead of MTProto.
+
+        It is deliberately *narrow*: it only ever announces a name the public
+        pages can prove is trace-free on **both** t.me and Fragment, and it says
+        plainly that the verdict came from public sources rather than Telegram.
+        A name it cannot settle is reported as "everything taken" with the best
+        candidate named - never dressed up as free.
+        """
+        screen_cap = UNLIMITED_SCREEN_CAP if runtime.unlimited_search else SCREEN_CAP
+        best: str | None = None
+        best_premium: Premium | None = None
+        screened = 0
+
+        stream = self._guarantee_candidates(criteria)
+        while screened < screen_cap:
+            batch: list[str] = []
+            for name in stream:
+                batch.append(name)
+                if len(batch) >= SCREEN_BATCH:
+                    break
+            if not batch:
+                break
+
+            survivors: list[str] = []
+            for name in batch:
+                premium = premium_rating(letter_part(name))
+                if best_premium is None or premium.total > best_premium.total:
+                    best, best_premium = name, premium
+                verdict = await public_verdict_client.judge(name)
+                if verdict.status == "occupied":
+                    continue  # ruled out for free
+                survivors.append(name)
+                if verdict.status == "free":
+                    # A name with no trace on either public page. This is the
+                    # answer - the only shape the public path can prove.
+                    logger.info("public-only search found @%s (no public trace)", name)
+                    basic = CheckResult(
+                        username=name, status=CheckStatus.AVAILABLE,
+                        source="public_verdict", detail="claimability_unverified",
+                    )
+                    attempt = await self._hit_attempt(
+                        name, basic, state, fragment_clear=True, fragment_checked=True
+                    )
+                    attempt.public_confidence = verdict.confidence
+                    attempt.public_reason = verdict.reason
+                    return attempt
+            screened += len(batch)
+            if progress is not None:
+                with contextlib.suppress(Exception):
+                    progress("public", screened, screen_cap, screened)
+
+        if best is not None:
+            return FindAttempt(
+                username=best,
+                premium=best_premium or premium_rating(""),
+                hit=False,
+                reason="all_taken",
+                generated_tries=screened,
+                public_confidence="public",
+                public_reason="no_public_trace_anywhere",
+            )
+        return FindAttempt(
+            username="", premium=premium_rating(""), hit=False,
+            reason="no_candidate", generated_tries=screened,
+        )
+
     async def _find_free(
         self, criteria: SearchCriteria, progress=None, max_seconds: float | None = None
     ) -> FindAttempt:
@@ -736,29 +882,26 @@ class UsernameFinder:
         guarantee_cap = UNLIMITED_GUARANTEE_SCREEN_CAP if high else GUARANTEE_SCREEN_CAP
 
         # If Telegram has already thrown a long FloodWait at us, a search cannot
-        # be carried out right now. Say so immediately instead of hanging on the
-        # limiter for hours while the user stares at "SEARCHING...".
+        # be carried out *through a session* right now. The search still happens,
+        # though - screening and the final verdict both live on public pages that
+        # need no session - so instead of reporting the throttle, hand the run to
+        # the public path and answer with a real name.
         paused = spend_flood_window(self._checker.limiter, MAX_SEARCHABLE_FLOOD_WAIT)
         if paused:
-            logger.warning("search aborted: telegram flood wait %.0fs outstanding", paused)
-            return FindAttempt(
-                username="", premium=premium_rating(""), hit=False,
-                reason="throttled", generated_tries=0,
-            )
+            logger.warning("telegram flood wait %.0fs outstanding - public path", paused)
+            return await self._public_only_search(criteria, progress, state)
 
         # The claimability gate is the line between "nobody owns it" and
-        # "Telegram will actually hand it over". Without it every verdict would
-        # be unverifiable - exactly the false "free" this bot must never emit -
-        # so refuse to run rather than lie. Occupied names still get screened
-        # out for free by the public page whenever the user asks.
+        # "Telegram will actually hand it over". Only a user session can close
+        # it, so without one a session-based "free" would be a guess. Rather than
+        # refuse (the old behaviour) or lie, run the public-only path: it screens
+        # and classifies from t.me + fragment.com, and every verdict it returns
+        # is labelled as coming from public sources.
         if not mtproto_client.user_ready:
             logger.warning(
-                "search refused: no user session - claimability cannot be verified"
+                "no user session - answering from public pages instead"
             )
-            return FindAttempt(
-                username="", premium=premium_rating(""), hit=False,
-                reason="claim_unavailable", generated_tries=0,
-            )
+            return await self._public_only_search(criteria, progress, state)
 
         budget = self._confirm_budget(criteria)
         state.budget = budget

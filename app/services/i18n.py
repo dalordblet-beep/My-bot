@@ -487,6 +487,19 @@ EN: dict[str, str] = {
         "{warn} Claimability not verified (no user session here) - Telegram may "
         "still refuse this name. See the FAQ / ask support."
     ),
+    "search.public_verdict": (
+        "{info} Verified from public sources only (t.me + Fragment): the name "
+        "leaves no trace anywhere. Telegram's own confirmation channel is "
+        "rate-limited right now, so this is a real, unclaimed handle rather "
+        "than a confirmation from Telegram itself."
+    ),
+    "search.public_taken": (
+        "{cross} Checked {n} names from public sources (t.me + Fragment) and "
+        "every one of them is taken.\n\n"
+        "Telegram's confirmation channel is rate-limited right now, so this run "
+        "used public pages only. Try again a little later, allow digits, or use "
+        "a different length."
+    ),
     "search.attempts": "{bolt} Attempts used: <b>{n}</b>",
     "search.no_candidate": "{warn} Could not build a name for those criteria. Loosen the mask or allow digits.",
     "search.no_free_found": (
@@ -1381,6 +1394,19 @@ RU: dict[str, str] = {
     "search.claim_unverified": (
         "{warn} Возможность занятия не проверена (здесь нет user-сессии) — "
         "Telegram может всё равно не отдать это имя."
+    ),
+    "search.public_verdict": (
+        "{info} Проверено только по публичным источникам (t.me + Fragment): имя "
+        "нигде не оставило следа. Канал подтверждения Telegram сейчас ограничен, "
+        "так что это реальный, никем не занятый ник — но не подтверждение от "
+        "самого Telegram."
+    ),
+    "search.public_taken": (
+        "{cross} Проверено имён по публичным источникам (t.me + Fragment): {n} — "
+        "все заняты.\n\n"
+        "Канал подтверждения Telegram сейчас ограничен, поэтому этот запуск "
+        "использовал только публичные страницы. Попробуйте позже, разрешите "
+        "цифры или смените длину."
     ),
     "search.attempts": "{bolt} Попыток использовано: <b>{n}</b>",
     "search.no_candidate": "{warn} Не удалось собрать имя под эти критерии. Ослабьте маску или разрешите цифры.",

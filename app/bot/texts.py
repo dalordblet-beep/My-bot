@@ -775,7 +775,16 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
             )
         if attempt.reason == "all_taken":
             # Every candidate this good already has an owner. Never dress an
-            # occupied name up as a result - explain and point at a trap.
+            # occupied name up as a result - explain and point at a trap. When
+            # the verdict came from the session-free public path, say so: the
+            # conclusion is the same, but the user deserves to know how it was
+            # reached rather than assuming Telegram said it.
+            if getattr(attempt, "public_confidence", None) == "public":
+                return (
+                    f"{t(lang, 'search.result_title')}\n\n"
+                    f"{t(lang, 'search.public_taken', n=attempt.generated_tries)}\n\n"
+                    f"{t(lang, 'search.all_taken_hint')}"
+                )
             return (
                 f"{t(lang, 'search.result_title')}\n\n"
                 f"{t(lang, 'search.all_taken', n=attempt.generated_tries)}\n\n"
@@ -832,6 +841,11 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
         basic_detail = getattr(attempt.basic, "detail", None)
         if basic_detail == "claimability_unverified":
             lines.append(t(lang, "search.claim_unverified"))
+        # The verdict came from the session-free public path (t.me + Fragment)
+        # rather than from Telegram itself. Say so plainly: the name is real and
+        # the classification is honest, but it is not Telegram's own answer.
+        if getattr(attempt, "public_confidence", None) == "public":
+            lines.append(t(lang, "search.public_verdict"))
 
     if attempt.value is not None:
         val = attempt.value
