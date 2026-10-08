@@ -5,6 +5,7 @@
 # Telethon session files (contain account credentials - never commit)
 *.session
 *.session-journal
+user_session_base64.txt
 
 # Local SQLite database
 *.db

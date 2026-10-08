@@ -45,3 +45,46 @@ def test_session_file_falls_back_to_the_relative_name_when_absent(tmp_path, monk
 
     assert found == (tmp_path / "username_scanner_user.session").resolve()
     assert not found.exists()
+
+
+# ---------------------------------------------------- env-var session (PaaS)
+import base64  # noqa: E402
+
+from app.config import settings  # noqa: E402
+
+
+def test_env_var_session_is_materialised_to_disk(tmp_path, monkeypatch):
+    """Container hostings wipe /app on restart: the session file travels as
+    the MTPROTO_USER_SESSION_DATA env var and is written out at startup."""
+    monkeypatch.chdir(tmp_path)
+    payload = b"SQLite session bytes"
+    monkeypatch.setattr(
+        settings, "mtproto_user_session_data", base64.b64encode(payload).decode()
+    )
+
+    mtproto_module.MtprotoClient._materialise_session_data()
+
+    written = tmp_path / "username_scanner_user.session"
+    assert written.exists()
+    assert written.read_bytes() == payload
+
+
+def test_a_real_session_file_wins_over_the_env_var(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "username_scanner_user.session").write_bytes(b"real file")
+    monkeypatch.setattr(
+        settings, "mtproto_user_session_data", base64.b64encode(b"env bytes").decode()
+    )
+
+    mtproto_module.MtprotoClient._materialise_session_data()
+
+    assert (tmp_path / "username_scanner_user.session").read_bytes() == b"real file"
+
+
+def test_invalid_env_var_session_is_ignored_without_crashing(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(settings, "mtproto_user_session_data", "not-base64-###")
+
+    mtproto_module.MtprotoClient._materialise_session_data()
+
+    assert not (tmp_path / "username_scanner_user.session").exists()

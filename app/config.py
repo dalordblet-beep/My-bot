@@ -53,6 +53,11 @@ class Settings(BaseSettings):
     # the next one is used. Empty means "just the single session above".
     # Create each with: python scripts/login_mtproto.py --user --name <base>
     mtproto_user_sessions: str = ""
+    # PaaS-friendly alternative to the session FILE: the full session file
+    # encoded as base64 (export with scripts/export_user_session.py). When
+    # set, the bot materialises it to disk at startup - no file transfer is
+    # needed on container hostings whose /app is wiped on restart.
+    mtproto_user_session_data: str = ""
     # Optional POOL of extra BOT tokens (comma separated, made in BotFather).
     # Each token gets its own MTProto session and its own Telegram quota, so
     # authoritative availability checks scale with the pool: a rate-limited

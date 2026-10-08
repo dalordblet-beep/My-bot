@@ -331,6 +331,42 @@ class MtprotoClient:
         self._user_clients = []
         self._user_turn = 0
 
+    @staticmethod
+    def _materialise_session_data() -> None:
+        """Write an env-var-provided session file to disk (container hosts).
+
+        Hostings like Bothost run the bot in a container whose /app is wiped
+        on restart, and uploading files into it is awkward. The session file
+        travels instead as the ``MTPROTO_USER_SESSION_DATA`` env variable
+        (base64 of the file, export with ``scripts/export_user_session.py``).
+        A real file on disk always wins over the env var.
+        """
+        import base64
+
+        raw = (settings.mtproto_user_session_data or "").strip()
+        if not raw:
+            return
+        names = settings.user_session_names
+        base = names[0] if names else "username_scanner_user"
+        target = Path(f"{base}.session")
+        if target.exists():
+            return
+        try:
+            data = base64.b64decode(raw, validate=True)
+        except Exception as exc:
+            logger.warning(
+                "MTPROTO_USER_SESSION_DATA is not valid base64 - ignored: %s", exc
+            )
+            return
+        try:
+            target.write_bytes(data)
+            logger.info(
+                "user session materialised from MTPROTO_USER_SESSION_DATA (%d bytes)",
+                len(data),
+            )
+        except OSError as exc:
+            logger.warning("could not write the env-var session file: %s", exc)
+
     async def start_user(self) -> bool:
         """Load the optional *user* session pool for account.checkUsername.
 
@@ -346,6 +382,8 @@ class MtprotoClient:
         """
         if not self.configured or self._user_clients:
             return self.user_ready
+
+        self._materialise_session_data()
 
         names = settings.user_session_names
         found = 0
