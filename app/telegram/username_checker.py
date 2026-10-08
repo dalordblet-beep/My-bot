@@ -258,7 +258,25 @@ class UsernameChecker:
             if mt.kind == "flood":
                 seconds = float(mt.detail or 0) + settings.floodwait_safety_margin
                 shared_flood_budget.record(seconds)
-                # Every MTProto session is parked. The account-free signals
+                # Every *bot* session is parked - but the user session is a
+                # different account with a quota of its own, and
+                # account.checkUsername is the one call that can still answer
+                # "claimable, yes or no". Use it instead of declaring the check
+                # dead: this is what keeps a real, verified name coming out while
+                # the bot pool sits out its FloodWait.
+                if mtproto_client.user_ready:
+                    claimable = await mtproto_client.check_username(name)
+                    if claimable is True:
+                        return CheckResult(
+                            username=name, status=CheckStatus.AVAILABLE,
+                            source="mtproto_user", detail="claimability_verified",
+                        )
+                    if claimable is False:
+                        return CheckResult(
+                            username=name, status=CheckStatus.INVALID,
+                            source="mtproto_user", reason="not_assignable",
+                        )
+                # Nothing with a quota could answer. The account-free signals
                 # (Bot API + public page) cost no MTProto quota and can still
                 # screen names out, so a temporary Telegram limit degrades the
                 # bot instead of taking it down.

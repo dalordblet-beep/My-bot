@@ -183,19 +183,58 @@ async def test_variants_respects_the_screening_cap(bot, monkeypatch):
     assert confirmations == 7
 
 
-async def test_variants_stops_on_flood_wait(bot, monkeypatch):
+async def test_variants_waits_out_a_flood_wait(bot, monkeypatch):
+    """Variants obey the same rule as a free search: a throttle is waited out.
+
+    It used to stop dead on the first FloodWait, so a user asking for
+    alternatives got an empty shortlist - the "Telegram is limiting us" dead end
+    in a different shape. Now the run holds on and asks again.
+    """
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult
 
     monkeypatch.setattr(settings, "allow_bot_api_availability", True)
     monkeypatch.setattr(finder_module, "VARIANT_CONFIRM_BUDGET", 20)
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
-    confirmations = 0
+
+    calls = 0
+
+    async def throttled_then_free(name):
+        nonlocal calls
+        calls += 1
+        if calls <= 2:
+            return CheckResult(
+                username=name, status=CheckStatus.RATE_LIMITED,
+                source="mtproto", reason="flood_wait",
+            )
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
+
+    checker.confirm_availability = throttled_then_free
+    attempt = await UsernameFinder(checker, None).find_one(
+        SearchCriteria(target=TARGET_VARIANTS, seed="crane")
+    )
+
+    assert attempt.reason == "variants"
+    # It did not stop at the throttle - it waited, retried, and filled the list.
+    assert calls > 2
+    assert attempt.variants
+
+
+async def test_variants_give_up_only_when_waiting_stops_helping(bot, monkeypatch):
+    """The honest last resort for variants: a throttle longer than the run may
+    last. It stays reachable, but only after the whole wait budget is gone."""
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
+    monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="free"))
 
     async def throttled(name):
-        nonlocal confirmations
-        confirmations += 1
         return CheckResult(
             username=name, status=CheckStatus.RATE_LIMITED,
             source="mtproto", reason="flood_wait",
@@ -207,7 +246,6 @@ async def test_variants_stops_on_flood_wait(bot, monkeypatch):
     )
 
     assert attempt.reason == "variants"
-    assert confirmations == 1
     assert attempt.variants == []
 
 

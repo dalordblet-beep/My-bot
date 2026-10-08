@@ -38,6 +38,7 @@ from app.database import repository as repo
 from app.database.database import session_scope
 from app.search.finder import (
     SCREEN_CAP,
+    UNLIMITED_SCREEN_CAP,
     SearchCriteria,
     UsernameFinder,
 )
@@ -105,11 +106,15 @@ class SearchQueue:
         checker: UsernameChecker,
         collectible_checker: CollectibleChecker | None = None,
         max_pending: int = MAX_PENDING,
+        stock=None,
     ) -> None:
         self._bot = bot
         self._checker = checker
         self._collectible = collectible_checker
         self._max_pending = max(1, int(max_pending))
+        # The ready supply of verified-free names. Optional: without it every
+        # search hunts, which is what the tests and one-off runs want.
+        self._stock = stock
         self._pending: dict[str, SearchJob] = {}
         self._tasks: set[asyncio.Task] = set()
         self._started = False
@@ -157,6 +162,15 @@ class SearchQueue:
     def pending(self) -> int:
         return len(self._pending)
 
+    @property
+    def busy(self) -> bool:
+        """True while any search is in flight.
+
+        Background work (the name harvester) reads this and stands down: a user
+        who is waiting for a name must always get the quota first.
+        """
+        return bool(self._tasks)
+
     async def submit(
         self,
         *,
@@ -202,7 +216,7 @@ class SearchQueue:
             self._pending.pop(key, None)
 
     async def _process(self, job: SearchJob) -> None:
-        finder = UsernameFinder(self._checker, self._collectible)
+        finder = UsernameFinder(self._checker, self._collectible, stock=self._stock)
         # Live counters for the progress screen; the finder's callback keeps
         # them truthful (real confirmations, real screening counts).
         snapshot = {"phase": "valuable", "confirmations": 0, "budget": 0, "screened": 0}
@@ -275,7 +289,7 @@ class SearchQueue:
         screened = snapshot["screened"]
         # The scan limit matches what the finder actually uses, so the bar
         # stays honest in unlimited mode too.
-        cap = 5000 if runtime.unlimited_search else SCREEN_CAP
+        cap = UNLIMITED_SCREEN_CAP if runtime.unlimited_search else SCREEN_CAP
         # Two truthful sources of motion: authoritative checks move the bar in
         # jumps, free screening creeps it forward between them.
         share = max(confirmations / budget, screened / cap)
@@ -292,11 +306,14 @@ class SearchQueue:
         bar = "".join(cells)
 
         spinner = SPINNER_FRAMES[step % len(SPINNER_FRAMES)]
-        phase_key = (
-            "search.progress_phase_guarantee"
-            if snapshot["phase"] == "guarantee"
-            else "search.progress_phase_valuable"
-        )
+        # The waiting phase is shown when the finder is sitting out a Telegram
+        # throttle instead of reporting it: the screen must say what is really
+        # happening, or a hold looks like a hang.
+        phase_key = {
+            "guarantee": "search.progress_phase_guarantee",
+            "waiting": "search.progress_phase_waiting",
+            "stock": "search.progress_phase_stock",
+        }.get(snapshot["phase"], "search.progress_phase_valuable")
         seconds = int(time.monotonic() - started)
         return "\n".join(
             [

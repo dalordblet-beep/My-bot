@@ -262,7 +262,6 @@ class PortfolioItem(Base):
 
 class Favorite(Base):
     """A username the user saved, with an optional note."""
-
     __tablename__ = "favorites"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -277,4 +276,42 @@ class Favorite(Base):
 
     __table_args__ = (
         UniqueConstraint("telegram_id", "username", name="uq_favorite_user_name"),
+    )
+
+
+class FreeName(Base):
+    """A username Telegram has confirmed as *claimable*, kept ready to hand out.
+
+    Telegram rate-limits the authoritative availability check hard (roughly
+    20-30 calls per account per minute), and hunting one name on demand costs
+    several calls because most candidates are taken. That is why a search used
+    to end in an apology instead of a name whenever the bot was busy.
+
+    Verification is therefore decoupled from delivery: a background harvester
+    spends the *idle* quota proving names free and parks them here, and a search
+    serves one after a single re-confirmation. The re-confirmation is what keeps
+    the promise honest - a stored name is only handed over when Telegram still
+    answers "claimable" for it at that moment. A stale row (somebody claimed the
+    name meanwhile) is dropped and the search carries on.
+    """
+
+    __tablename__ = "free_names"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # Total length, and whether the name carries digits: both are user filters,
+    # so a stored name can only be served to a search that asked for that shape.
+    length: Mapped[int] = mapped_column(Integer, default=0, index=True)
+    has_digits: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    # The bot's own taste score, so the prettiest stored names are served first.
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    source: Mapped[str] = mapped_column(String(24), default="harvest")
+    # When Telegram last confirmed the name claimable. Old rows are pruned: a
+    # free name can be claimed by anybody at any moment.
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Set when a search picks the row up, so two concurrent searches can never be
+    # handed the same name. The row returns to the pool if delivery does not
+    # complete (see the reservation window in the repository).
+    served_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )

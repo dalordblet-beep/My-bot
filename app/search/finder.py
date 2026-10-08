@@ -26,10 +26,11 @@ import asyncio
 import contextlib
 import random
 from dataclasses import asdict, dataclass
-from typing import Iterator
+from typing import Any, Iterator
 
 from app.collectible.checker import CollectibleChecker
 from app.collectible.valuation import estimate_price
+from app.config import settings
 from app.search.generator import (
     UsernameGenerator,
     beautiful_candidates,
@@ -115,10 +116,29 @@ VALUABLE_CONFIRM_BUDGET = 5
 # the progress screen exists precisely to make that wait bearable.
 SHORT_NAME_LENGTH = 6
 SHORT_NAME_CONFIRM_BUDGET = 30
+# Unlimited mode ("free bot"): keep hunting until a name is found. The ceiling
+# still exists, because "unlimited" must not mean "ten minutes of frozen screen":
+# 120 confirmations is already far past the point where the guarantee stream
+# hands back a free name, and without a cap one search could sit on the scarce
+# Telegram quota and starve every other user.
+UNLIMITED_CONFIRM_BUDGET = 120
+UNLIMITED_SHORT_CONFIRM_BUDGET = 150
+# Screening is free (a plain t.me GET), but it is still work: the unlimited
+# allowances are wide enough to feed the confirmation budget, not open-ended.
+UNLIMITED_SCREEN_CAP = 800
+UNLIMITED_GUARANTEE_SCREEN_CAP = 1500
 # If a FloodWait is longer than this, do not sit on it: a search the user is
 # waiting on must answer now and say "Telegram is throttling us", not hang.
 # A multi-minute wait is not a search, it is a stuck screen.
 MAX_SEARCHABLE_FLOOD_WAIT = 90.0
+# How long one search may spend *waiting out* Telegram throttling before it
+# gives up. A throttle is waited out rather than reported - the user asked for a
+# name, not for an explanation - but a search cannot sit there indefinitely.
+# Tunable from the environment (MAX_SEARCH_SECONDS).
+MAX_SEARCH_SECONDS = settings.max_search_seconds
+# Pause used when Telegram reports a flood but no session recovery time is
+# known (nothing is parked, so the limit came from somewhere else).
+FLOOD_RETRY_PAUSE = 5.0
 
 
 @dataclass
@@ -154,6 +174,11 @@ class _SweepState:
     unknown_seen: int = 0
     best: str | None = None
     best_premium: Premium | None = None
+    # The confirmation ceiling this run shares, and the wall-clock deadline it
+    # may not pass while waiting out Telegram throttling. Both live here so the
+    # sweeps and the flood wait agree on one budget instead of three.
+    budget: int = 0
+    deadline: float = 0.0
     # A name that resolves as unoccupied but whose claimability could not be
     # verified (no user session, or its checkUsername was rate-limited). It is
     # never delivered as a result - if the hunt ends with only these, the run
@@ -185,10 +210,15 @@ class UsernameFinder:
         checker: UsernameChecker,
         collectible: CollectibleChecker | None,
         rng: random.Random | None = None,
+        stock: Any | None = None,
     ) -> None:
         self._checker = checker
         self._collectible = collectible
         self._rng = rng or random.Random()
+        # The ready supply of names already proven free (see app/services/
+        # name_stock.py). Optional: without it the search simply hunts, which is
+        # exactly what the tests and one-off runs want.
+        self._stock = stock
 
     async def _price(self, name: str) -> int | None:
         """One-number market estimate from live Fragment comparables."""
@@ -243,15 +273,22 @@ class UsernameFinder:
             if premium_rating(letter_part(name)).total >= PREMIUM_FLOOR:
                 yield name
 
-    async def find_one(self, criteria: SearchCriteria, progress=None) -> FindAttempt:
+    async def find_one(
+        self, criteria: SearchCriteria, progress=None, max_seconds: float | None = None
+    ) -> FindAttempt:
         """Run a search. ``progress``, when given, is called as
         ``progress(phase, confirmations, budget, screened)`` after every
         authoritative check so a caller can animate the wait with real numbers
-        instead of a fake spinner."""
+        instead of a fake spinner.
+
+        ``max_seconds`` overrides how long the run may spend waiting out
+        Telegram throttling. Background work (the name harvester) passes a short
+        value so it can never hold the scarce quota while a user is waiting.
+        """
         if criteria.target == TARGET_VARIANTS:
             return await self._find_variants(criteria)
 
-        return await self._find_free(criteria, progress)
+        return await self._find_free(criteria, progress, max_seconds)
 
     async def _screen(self, names: list[str]) -> list[str]:
         """Drop the names the free public page proves occupied.
@@ -306,11 +343,43 @@ class UsernameFinder:
     def _confirm_budget(self, criteria: SearchCriteria) -> int:
         """Total confirmations this search may spend, by name length."""
         high = runtime.unlimited_search
-        free = 500 if high else FREE_CONFIRM_BUDGET
-        short = 500 if high else SHORT_NAME_CONFIRM_BUDGET
+        free = UNLIMITED_CONFIRM_BUDGET if high else FREE_CONFIRM_BUDGET
+        short = UNLIMITED_SHORT_CONFIRM_BUDGET if high else SHORT_NAME_CONFIRM_BUDGET
         if criteria.length is not None and criteria.length <= SHORT_NAME_LENGTH:
             return max(free, short)
         return free
+
+    async def _wait_out_flood(
+        self,
+        deadline: float,
+        progress=None,
+        snapshot: tuple[int, int, int] | None = None,
+    ) -> bool:
+        """Hold on until the throttled session pool comes back.
+
+        ``True`` = waited, carry on. ``False`` = waiting is pointless (the
+        recovery is further away than this search is allowed to last).
+
+        A FloodWait used to end the search with "Telegram is limiting us" - the
+        one answer the product must not give, because it is not a result, it is
+        an excuse. The wait is physical and cannot be argued with, so it is
+        *spent* rather than reported: the screen switches to the "waiting" phase
+        and keeps breathing, and the very same name is asked about again the
+        moment the pool is back.
+        """
+        now = asyncio.get_event_loop().time()
+        wait = mtproto_client.flood_recovery_seconds
+        if not wait or wait <= 0:
+            # Nothing is parked, yet the check came back limited - wait one
+            # short beat and retry rather than spinning on the same call.
+            wait = FLOOD_RETRY_PAUSE
+        if now + wait > deadline:
+            return False
+        if progress is not None and snapshot is not None:
+            with contextlib.suppress(Exception):
+                progress("waiting", snapshot[0], snapshot[1], snapshot[2])
+        await asyncio.sleep(wait)
+        return True
 
     def _guarantee_candidates(self, criteria: SearchCriteria) -> Iterator[str]:
         """The guarantee stream: names that are actually still free.
@@ -369,7 +438,8 @@ class UsernameFinder:
         """Screen and confirm candidates until one is free or the budget is spent.
 
         Returns a :class:`FindAttempt` only when the run must stop for a reason
-        the user needs to hear about - a confirmed free name, or a throttle.
+        the user needs to hear about - a confirmed free name, or, as the very
+        last resort, a throttle that outlasted the search's whole wait budget.
         ``None`` means "budget spent on this stream, carry on with the next one".
 
         ``budget`` is a ceiling on ``state.confirmations``, so several sweeps in
@@ -400,12 +470,40 @@ class UsernameFinder:
             screened_here += len(batch)
             state.occupied_seen += len(batch) - len(survivors)
 
-            for name in survivors:
+            index = 0
+            while index < len(survivors):
                 if state.confirmations >= budget:
                     break
 
+                name = survivors[index]
                 basic = await self._checker.confirm_availability(name)
+
+                if basic.status is CheckStatus.RATE_LIMITED:
+                    # Telegram is throttling the pool. This is not a result and
+                    # must never be the last word: hold on until a session comes
+                    # back and then ask about the very same name again. The
+                    # search only stops when waiting itself stops making sense.
+                    if not await self._wait_out_flood(
+                        state.deadline, progress,
+                        (state.confirmations, budget, state.screened),
+                    ):
+                        logger.warning(
+                            "search stopped after %d candidates: telegram still "
+                            "throttling after the wait budget",
+                            state.screened,
+                        )
+                        return FindAttempt(
+                            username="",
+                            premium=state.best_premium or premium_rating(""),
+                            hit=False,
+                            reason="throttled",
+                            generated_tries=state.screened,
+                            value=estimate_value(state.best) if state.best else None,
+                        )
+                    continue  # retry this name, not the next one
+
                 state.confirmations += 1
+                index += 1
                 if progress is not None:
                     with contextlib.suppress(Exception):
                         progress(phase, state.confirmations, budget, state.screened)
@@ -445,21 +543,6 @@ class UsernameFinder:
 
                 if basic.status is CheckStatus.OCCUPIED:
                     state.occupied_seen += 1
-                elif basic.status is CheckStatus.RATE_LIMITED:
-                    # Telegram started throttling mid-run. Do not burn the rest
-                    # of the budget sleeping - report a throttle, not "taken".
-                    logger.warning(
-                        "search stopped after %d candidates: flood wait hit",
-                        state.screened,
-                    )
-                    return FindAttempt(
-                        username="",
-                        premium=state.best_premium or premium_rating(""),
-                        hit=False,
-                        reason="throttled",
-                        generated_tries=state.screened,
-                        value=estimate_value(state.best) if state.best else None,
-                    )
                 elif basic.status is CheckStatus.INVALID:
                     # Cannot be claimed either way - skip it silently.
                     continue
@@ -469,6 +552,65 @@ class UsernameFinder:
                     state.unknown_seen += 1
 
         return None
+
+    async def _serve_from_stock(
+        self, criteria: SearchCriteria, state: "_SweepState", progress=None
+    ) -> FindAttempt | None:
+        """Hand over a stored free name, re-confirmed right now.
+
+        The stored name was proven claimable when it was harvested, but a free
+        name can be claimed by anybody at any moment, so it is **never** delivered
+        on the strength of the old verdict: it goes through the same authoritative
+        check as a freshly found candidate. Only if Telegram still answers
+        "claimable" is it handed over - and then it is certain, because that is
+        the exact call the Telegram app itself makes.
+
+        Returns ``None`` when there is nothing suitable in stock or the stored
+        name turned out to be taken, in which case the caller simply hunts.
+        """
+        if self._stock is None:
+            return None
+
+        name = await self._stock.take(criteria.length, criteria.allow_digits)
+        if not name:
+            return None
+
+        if progress is not None:
+            with contextlib.suppress(Exception):
+                progress("stock", 1, state.budget or 1, state.screened)
+
+        basic = await self._checker.confirm_availability(name)
+        state.confirmations += 1
+
+        if basic.status is CheckStatus.RATE_LIMITED:
+            # Cannot re-confirm right now. Give the row back so it is not lost,
+            # and let the normal hunt - which knows how to wait - take over.
+            logger.info("stock: @%s could not be re-confirmed (throttled) - released", name)
+            await self._stock.release(name)
+            return None
+
+        detail = getattr(basic, "detail", None)
+        if basic.status is not CheckStatus.AVAILABLE or detail != "claimability_verified":
+            # Somebody claimed it since the harvest, or the verdict cannot be
+            # proven right now. Either way it is not a name this bot may show.
+            await self._stock.discard(name)
+            return None
+
+        fragment_clear, fragment_checked = await self._fragment_verdict(name)
+        if not fragment_clear:
+            # Listed for sale on Fragment: not claimable, so not a result.
+            await self._stock.discard(name)
+            return None
+
+        logger.info("stock: @%s re-confirmed free and delivered", name)
+        attempt = await self._hit_attempt(
+            name, basic, state, fragment_clear, fragment_checked
+        )
+        # Delivered, so it leaves the store: it is out in the world now and will
+        # most likely be claimed, and a stale row would only be served and thrown
+        # away later.
+        await self._stock.consume(name)
+        return attempt
 
     async def _hit_attempt(
         self, name: str, basic: CheckResult, state: "_SweepState",
@@ -488,7 +630,7 @@ class UsernameFinder:
         )
 
     async def _find_free(
-        self, criteria: SearchCriteria, progress=None
+        self, criteria: SearchCriteria, progress=None, max_seconds: float | None = None
     ) -> FindAttempt:
         """Walk candidates until one survives **both** checks.
 
@@ -506,10 +648,10 @@ class UsernameFinder:
         The run is **two passes over one shared confirmation budget**:
 
         1. the *valuable* pass - real words, brands and hybrids, the names a user
-           actually wants - claiming up to ``VALUABLE_CONFIRM_BUDGET``
-           confirmations;
+           actually wants - claiming a **share** of the allowance (never all of
+           it);
         2. the *guarantee* pass - clean coinages, which are effectively never
-           registered - spending whatever is left of ``FREE_CONFIRM_BUDGET``.
+           registered - spending whatever is left.
 
         That ordering is what makes a search answer with a free name rather than
         "everything is taken": real words get first refusal because they are
@@ -524,8 +666,8 @@ class UsernameFinder:
         # Free, unlimited bot: when enabled the search keeps scanning until it
         # finds a free name instead of stopping at the original conservative caps.
         high = runtime.unlimited_search
-        screen_cap = 5000 if high else SCREEN_CAP
-        guarantee_cap = 20000 if high else GUARANTEE_SCREEN_CAP
+        screen_cap = UNLIMITED_SCREEN_CAP if high else SCREEN_CAP
+        guarantee_cap = UNLIMITED_GUARANTEE_SCREEN_CAP if high else GUARANTEE_SCREEN_CAP
 
         # If Telegram has already thrown a long FloodWait at us, a search cannot
         # be carried out right now. Say so immediately instead of hanging on the
@@ -553,9 +695,28 @@ class UsernameFinder:
             )
 
         budget = self._confirm_budget(criteria)
+        state.budget = budget
+        state.deadline = asyncio.get_event_loop().time() + (
+            MAX_SEARCH_SECONDS if max_seconds is None else max(0.0, max_seconds)
+        )
+
+        # A name already proven free is the cheapest and most certain answer
+        # there is: one re-confirmation instead of a whole hunt. Serving from the
+        # stock is what lets the bot answer immediately when it is busy, instead
+        # of queueing every user behind the same scarce Telegram quota.
+        stocked = await self._serve_from_stock(criteria, state, progress)
+        if stocked is not None:
+            return stocked
 
         # Pass 1: the desirable names. Capped so they cannot eat the guarantee.
-        valuable_budget = min(500 if high else VALUABLE_CONFIRM_BUDGET, budget)
+        # In unlimited mode a flat ``min(500, budget)`` *was* the whole budget,
+        # which left the guarantee pass with nothing to spend and ended searches
+        # in "everything is taken" while free coinages were still out there - the
+        # reservation below is what keeps the second pass funded.
+        if high:
+            valuable_budget = min(max(VALUABLE_CONFIRM_BUDGET, budget // 4), budget)
+        else:
+            valuable_budget = min(VALUABLE_CONFIRM_BUDGET, budget)
         stopped = await self._sweep(
             self._candidates(criteria), valuable_budget, state, progress, "valuable", screen_cap
         )
@@ -670,27 +831,34 @@ class UsernameFinder:
         confirmations = 0
         screen_limit = min(len(candidates), VARIANT_SCREEN_CAP)
         throttled = False
+        deadline = asyncio.get_event_loop().time() + MAX_SEARCH_SECONDS
         for start in range(0, screen_limit, VARIANT_SCREEN_BATCH):
             if len(free) >= VARIANTS_CAP or confirmations >= VARIANT_CONFIRM_BUDGET:
                 break
             batch = candidates[start:min(start + VARIANT_SCREEN_BATCH, screen_limit)]
             survivors = await self._screen(batch)
             screened += len(batch)
-            for name in survivors:
+            index = 0
+            while index < len(survivors):
                 if len(free) >= VARIANTS_CAP or confirmations >= VARIANT_CONFIRM_BUDGET:
                     break
+                name = survivors[index]
                 basic = await self._checker.confirm_availability(name)
-                confirmations += 1
                 if basic.status is CheckStatus.RATE_LIMITED:
-                    # A throttle is an instruction to stop, not a reason to burn
-                    # the remaining confirmation budget. Anything already in
-                    # ``free`` remains authoritative and safe to return.
-                    logger.warning(
-                        "variants stopped after %d confirmations: flood wait hit",
-                        confirmations,
-                    )
-                    throttled = True
-                    break
+                    # Same rule as a free search: a throttle is waited out, not
+                    # turned into a dead end. Anything already in ``free`` stays
+                    # authoritative and safe to return either way.
+                    if not await self._wait_out_flood(deadline):
+                        logger.warning(
+                            "variants stopped after %d confirmations: telegram "
+                            "still throttling after the wait budget",
+                            confirmations,
+                        )
+                        throttled = True
+                        break
+                    continue  # retry this name, not the next one
+                confirmations += 1
+                index += 1
                 if basic.status is CheckStatus.AVAILABLE:
                     if getattr(basic, "detail", None) == "claimability_unverified":
                         # Unverifiable claimability is never listed as a free

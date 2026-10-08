@@ -23,6 +23,7 @@ from app.collectible.checker import CollectibleChecker
 from app.config import settings
 from app.database.database import dispose_db, init_db, session_scope
 from app.services.captcha import CaptchaService
+from app.services.name_stock import NameStock
 from app.services.runtime_config import runtime
 from app.services.search_queue import SearchQueue
 from app.services.daily_drop import DailyDropService
@@ -139,7 +140,12 @@ async def run() -> None:
 
     # Searches run through a queue so a user never waits on Telegram pacing, and
     # so the safe request rate holds no matter how many people press Run at once.
-    search_queue = SearchQueue(bot, checker, collectible_checker)
+    # The name stock is the ready supply of already-verified free names: the
+    # harvester fills it from the idle quota, and a search serves from it after a
+    # single re-confirmation, so a busy bot still answers with a real name.
+    name_stock = NameStock(checker, collectible_checker)
+    search_queue = SearchQueue(bot, checker, collectible_checker, stock=name_stock)
+    name_stock.attach_queue(search_queue)
     daily_drop = DailyDropService(bot, search_queue)
 
     dp = build_dispatcher(cache, checker, collectible_checker, captcha_service, search_queue)
@@ -163,6 +169,9 @@ async def run() -> None:
     search_queue.start()
     logger.info("search runner running=%s", search_queue.running)
 
+    name_stock.start()
+    logger.info("name stock running=%s", name_stock.running)
+
     daily_drop.start()
     logger.info("daily drop running=%s", daily_drop.running)
 
@@ -184,6 +193,7 @@ async def run() -> None:
     finally:
         logger.info("shutting down")
         await search_queue.stop()
+        await name_stock.stop()
         await daily_drop.stop()
         await watcher.stop()
         lock.release()

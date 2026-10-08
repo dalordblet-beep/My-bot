@@ -426,6 +426,12 @@ EN: dict[str, str] = {
     "search.running": "{search} <b>SEARCHING...</b>",
     "search.progress_phase_valuable": "{compass} <i>Hunting the beautiful names…</i>",
     "search.progress_phase_guarantee": "{gem} <i>Digging for a free one…</i>",
+    "search.progress_phase_waiting": (
+        "{hourglass} <i>Telegram asked us to slow down - holding on, not giving up…</i>"
+    ),
+    "search.progress_phase_stock": (
+        "{gem} <i>Taking a name we already proved free and re-checking it…</i>"
+    ),
     "search.progress_checked": "{bolt} Checked: <b>{n}</b> · {s}s",
     "search.started": (
         "{search} <b>SEARCH RUNNING</b>\n\n"
@@ -1301,6 +1307,12 @@ RU: dict[str, str] = {
     "search.running": "{search} <b>ИДЁТ ПОИСК...</b>",
     "search.progress_phase_valuable": "{compass} <i>Перебираю красивые имена…</i>",
     "search.progress_phase_guarantee": "{gem} <i>Копаю до свободного…</i>",
+    "search.progress_phase_waiting": (
+        "{hourglass} <i>Telegram просит сбавить темп — держусь и не бросаю поиск…</i>"
+    ),
+    "search.progress_phase_stock": (
+        "{gem} <i>Беру имя, которое уже доказано свободным, и перепроверяю его…</i>"
+    ),
     "search.progress_checked": "{bolt} Проверено: <b>{n}</b> · {s}с",
     "search.started": (
         "{search} <b>ПОИСК ЗАПУЩЕН</b>\n\n"

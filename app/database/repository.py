@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Sequence
 
-from sqlalchemy import delete, func, or_, select
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database.models import (
@@ -13,6 +13,7 @@ from app.database.models import (
     Battle,
     BotSetting,
     Favorite,
+    FreeName,
     PortfolioItem,
     Search,
     Trap,
@@ -853,3 +854,88 @@ async def recent_available_usernames(session: AsyncSession, limit: int = 400) ->
         .limit(limit)
     )
     return result.scalars().all()
+
+
+# ------------------------------------------------------------------ free stock
+# The ready supply of *verified* free names (see the FreeName model). The
+# repository only moves rows; the policy - when to harvest, when a stored name
+# is stale - lives in app/services/name_stock.py.
+async def add_free_name(
+    session: AsyncSession,
+    username: str,
+    length: int,
+    has_digits: bool,
+    score: int,
+    source: str = "harvest",
+) -> bool:
+    """Store a name Telegram just confirmed claimable. ``False`` if already held."""
+    existing = await session.execute(select(FreeName.id).where(FreeName.username == username))
+    if existing.scalar_one_or_none() is not None:
+        return False
+    session.add(
+        FreeName(
+            username=username, length=length, has_digits=has_digits,
+            score=score, source=source,
+        )
+    )
+    await session.flush()
+    return True
+
+
+async def count_free_names(session: AsyncSession) -> int:
+    result = await session.execute(select(func.count(FreeName.id)))
+    return int(result.scalar_one())
+
+
+async def take_free_name(
+    session: AsyncSession,
+    length: int | None = None,
+    allow_digits: bool = True,
+    reserve_seconds: int = 180,
+) -> str | None:
+    """Reserve the best stored name matching the requested shape, and return it.
+
+    The row is *reserved*, not deleted: ``served_at`` is stamped and the row is
+    skipped by other callers for ``reserve_seconds``. That way two searches
+    running at the same time can never be handed the same username, and a
+    delivery that does not complete (the re-confirmation came back throttled)
+    returns the row to the pool by itself instead of silently burning it.
+    """
+    cutoff = utcnow() - timedelta(seconds=max(0, reserve_seconds))
+    query = (
+        select(FreeName)
+        .where(or_(FreeName.served_at.is_(None), FreeName.served_at < cutoff))
+        .order_by(FreeName.score.desc(), FreeName.verified_at.desc())
+        .limit(40)
+    )
+    if length is not None:
+        query = query.where(FreeName.length == length)
+    if not allow_digits:
+        query = query.where(FreeName.has_digits.is_(False))
+
+    rows = (await session.execute(query)).scalars().all()
+    if not rows:
+        return None
+    row = rows[0]
+    row.served_at = utcnow()
+    await session.flush()
+    return row.username
+
+
+async def release_free_name(session: AsyncSession, username: str) -> None:
+    """Return a reserved name to the pool (delivery could not be completed)."""
+    await session.execute(
+        update(FreeName).where(FreeName.username == username).values(served_at=None)
+    )
+
+
+async def drop_free_name(session: AsyncSession, username: str) -> None:
+    """Forget a stored name - it is no longer claimable, so it is worthless."""
+    await session.execute(delete(FreeName).where(FreeName.username == username))
+
+
+async def prune_free_names(session: AsyncSession, older_than_seconds: int) -> int:
+    """Drop stale rows. A free name can be claimed by anyone at any moment."""
+    cutoff = utcnow() - timedelta(seconds=max(0, older_than_seconds))
+    result = await session.execute(delete(FreeName).where(FreeName.verified_at < cutoff))
+    return int(result.rowcount or 0)

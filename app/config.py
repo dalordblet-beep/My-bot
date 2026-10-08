@@ -123,6 +123,27 @@ class Settings(BaseSettings):
     # banned - 0.35s is 171/min, ~6x over the escalation threshold.
     request_delay: float = 3.0
     floodwait_safety_margin: int = 3
+    # How long a single search may spend *waiting out* Telegram throttling
+    # before it gives up and says so. A throttle is waited out rather than
+    # reported, because "Telegram is limiting us" is not a result - but a search
+    # cannot sit on the screen for ever. Raise it to trade patience for the
+    # throttle notice; it is the only knob that still produces that message.
+    max_search_seconds: float = 240.0
+
+    # --- free-name stock --------------------------------------------------
+    # The answer to "the bot must produce a free name even when it is busy".
+    # A background harvester spends the *idle* Telegram quota proving names free
+    # and parks them; a search then serves one after a single re-confirmation
+    # instead of paying for a whole hunt. 0 turns the harvester off.
+    name_stock_target: int = 20
+    # Seconds between harvest ticks. The harvester always yields to a live search.
+    name_stock_interval: float = 15.0
+    # A stored name is re-confirmed before delivery and pruned after this long -
+    # a free name can be claimed by anybody at any moment.
+    name_stock_ttl: int = 3600
+    # How long one harvest may spend waiting out throttling. Short on purpose:
+    # background work must never hold the quota a waiting user needs.
+    name_stock_harvest_seconds: float = 45.0
     # How long an OCCUPIED verdict is trusted, in seconds. A taken name rarely
     # frees up, and a stale "taken" can only cause a miss - never a false
     # "free" - so this is safe to keep long. It is the single biggest saving on

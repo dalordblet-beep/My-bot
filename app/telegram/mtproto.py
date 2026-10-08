@@ -25,6 +25,12 @@ logger = get_logger(__name__)
 # session file the operator uploads next to the code.
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+# Adaptive pool pacing: every FloodWait doubles the interval multiplier
+# (capped), and this many flood-free seconds reset it back to full speed.
+_PACE_DECAY_SECONDS = 600.0
+_PACE_MULTIPLIER_CAP = 16.0
+_PACE_BASE_MARGIN = 2.0
+
 
 def _session_file(name: str, root: Path | None = None) -> Path:
     """Locate a session file: working directory first, then the project root.
@@ -129,6 +135,10 @@ class MtprotoClient:
         self._bot_clients: list[dict[str, Any]] = []
         self._bot_turn = 0
         self._main_cooldown = 0.0
+        # Adaptive pool pacing (see call_interval): floods back the pace off,
+        # flood-free minutes recover it.
+        self._pace_multiplier = 1.0
+        self._last_flood_at = 0.0
         # Optional pool of user sessions, used only for account.checkUsername.
         # Each entry: {"name", "client", "ready", "cooldown_until"}.
         self._user_clients: list[dict[str, Any]] = []
@@ -177,12 +187,35 @@ class MtprotoClient:
     def call_interval(self) -> float:
         """Seconds between authoritative calls, shared across the live pool.
 
-        ``request_delay`` is the per-account safe rate (3.0s == 20/min); the
-        pool divides it, and a 1.5x margin keeps live sessions away from the
-        escalation threshold - running the bare 20/min got fresh bot accounts
-        FloodWaited under real multi-user load.
+        ``request_delay`` is the per-account safe rate; the pool divides it and
+        a safety margin keeps live sessions away from the escalation threshold.
+        Fresh bot accounts carry a much smaller quota than seasoned ones, so on
+        top of the base margin the pace is **adaptive**: every FloodWait doubles
+        the multiplier (capped), and ten flood-free minutes reset it - the pool
+        slows itself down until Telegram stops complaining, then speeds back.
         """
-        return max(0.35, settings.request_delay * 1.5 / max(1, self.bot_session_count))
+        now = asyncio.get_event_loop().time()
+        if self._pace_multiplier > 1.0 and now - self._last_flood_at > _PACE_DECAY_SECONDS:
+            self._pace_multiplier = 1.0
+            logger.info("session pool pace recovered after %.0f flood-free seconds", _PACE_DECAY_SECONDS)
+        return max(
+            0.35,
+            settings.request_delay * _PACE_BASE_MARGIN * self._pace_multiplier
+            / max(1, self.bot_session_count),
+        )
+
+    def _register_flood(self) -> None:
+        """Back the whole pool off: one account flooding hints the load is hot."""
+        now = asyncio.get_event_loop().time()
+        if now - self._last_flood_at > _PACE_DECAY_SECONDS:
+            self._pace_multiplier = 2.0  # a fresh flood starts a new backoff
+        else:
+            self._pace_multiplier = min(self._pace_multiplier * 2.0, _PACE_MULTIPLIER_CAP)
+        self._last_flood_at = now
+        logger.warning(
+            "pool pace backed off: x%.1f (interval %.2fs)",
+            self._pace_multiplier, self.call_interval,
+        )
 
     @property
     def user_ready(self) -> bool:
@@ -343,6 +376,8 @@ class MtprotoClient:
         self._bot_clients = []
         self._bot_turn = 0
         self._main_cooldown = 0.0
+        self._pace_multiplier = 1.0
+        self._last_flood_at = 0.0
         self._user_clients = []
         self._user_turn = 0
 
@@ -500,11 +535,13 @@ class MtprotoClient:
         until = asyncio.get_event_loop().time() + max(wait, 0.0)
         if name == "main":
             self._main_cooldown = until
-            return
-        for entry in self._bot_clients:
-            if entry["name"] == name:
-                entry["cooldown_until"] = until
-                return
+        else:
+            for entry in self._bot_clients:
+                if entry["name"] == name:
+                    entry["cooldown_until"] = until
+                    break
+        # Every flood is a signal the load is hot: back the whole pool off.
+        self._register_flood()
 
     def _soonest_recovery(self) -> float | None:
         """Seconds until some parked session becomes usable again."""
@@ -519,26 +556,43 @@ class MtprotoClient:
         )
         return min(waits) if waits else None
 
+    @property
+    def flood_recovery_seconds(self) -> float | None:
+        """Seconds until some parked session is usable again.
+
+        ``None`` means no session is parked, so there is nothing to wait for.
+        Callers that must not fail on a throttle (a search a user is waiting on)
+        use this to decide how long to hold on.
+        """
+        return self._soonest_recovery()
+
     def _pool_candidates(self) -> list[tuple[str, Any]]:
-        """Live sessions in rotation order: main first, then extras.
+        """Live sessions in rotation order, starting at the current turn.
+
+        Every session - the main one included - takes an **equal share** of the
+        traffic. That is not a detail: with the main session pinned to the front
+        of the list it answered *every* call until Telegram flooded it, so a
+        five-session pool carried exactly one account's quota and ran into the
+        limit after roughly twenty lookups. Round-robin over the whole pool is
+        what actually turns extra tokens into extra throughput.
 
         FloodWait-parked sessions are skipped - they cannot serve a call.
         """
-        candidates: list[tuple[str, Any]] = []
         now = asyncio.get_event_loop().time()
+        live: list[tuple[str, Any]] = []
         if self._ready and self._client is not None and self._main_cooldown <= now:
-            candidates.append(("main", self._client))
-
-        ready = [
-            entry for entry in self._bot_clients
+            live.append(("main", self._client))
+        live.extend(
+            (entry["name"], entry["client"])
+            for entry in self._bot_clients
             if entry["ready"] and entry["cooldown_until"] <= now
-        ]
-        if ready:
-            turn = self._bot_turn % len(ready)
-            self._bot_turn += 1
-            ordered = ready[turn:] + ready[:turn]
-            candidates.extend((entry["name"], entry["client"]) for entry in ordered)
-        return candidates
+        )
+
+        if not live:
+            return []
+        turn = self._bot_turn % len(live)
+        self._bot_turn += 1
+        return live[turn:] + live[:turn]
 
     async def resolve_username(self, username: str) -> MtprotoResult:
         """Resolve a username across the whole session pool.

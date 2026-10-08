@@ -111,6 +111,63 @@ async def test_all_sessions_parked_reports_flood_with_recovery_time(monkeypatch)
     assert float(verdict.detail) <= 31
 
 
+async def test_every_session_shares_the_traffic(monkeypatch):
+    """The main session must not answer every call.
+
+    Pinning it to the front of the list meant a five-session pool still carried
+    exactly one account's quota: Telegram flooded that account after roughly
+    twenty lookups and the search died - the reported "stopped after 20 checks".
+    Round-robin over the whole pool is what turns extra tokens into throughput.
+    """
+    client = mtproto_module.mtproto_client
+    main = FakeClient(lambda request: _occupied_response())
+    extra = FakeClient(lambda request: _occupied_response())
+
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", main, raising=False)
+    monkeypatch.setattr(client, "_bot_clients", [_session("p2", extra)], raising=False)
+    monkeypatch.setattr(client, "_bot_turn", 0, raising=False)
+    monkeypatch.setattr(client, "_main_cooldown", 0.0, raising=False)
+
+    for _ in range(4):
+        await client.resolve_username("somebody")
+
+    assert main.calls == 2 and extra.calls == 2
+
+
+async def test_parked_bot_pool_falls_back_to_the_user_session(monkeypatch):
+    """When every bot session is parked, the user session still answers.
+
+    It is a different account with a quota of its own, and
+    ``account.checkUsername`` is the one call that can still say "claimable" -
+    so a fully parked bot pool slows a search down instead of ending it with a
+    throttle and no name.
+    """
+    client = mtproto_module.mtproto_client
+
+    async def all_parked(name):
+        return MtprotoResult("flood", "90")
+
+    async def claimable(name):
+        return True
+
+    monkeypatch.setattr(client, "resolve_username", all_parked, raising=False)
+    monkeypatch.setattr(client, "check_username", claimable, raising=False)
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", None, raising=False)
+    monkeypatch.setattr(settings, "request_delay", 0.0)
+
+    checker = UsernameChecker(
+        cache=None, bot=None, rate_limiter=RateLimiter(min_interval=0.0),
+        page_probe=FakePageProbe(state="unknown"),
+    )
+    result = await checker.check_free_candidate("somefree")
+
+    assert result.status is CheckStatus.AVAILABLE
+    assert result.source == "mtproto_user"
+    assert result.detail == "claimability_verified"
+
+
 async def test_pool_counts_only_ready_sessions(monkeypatch):
     client = mtproto_module.mtproto_client
     monkeypatch.setattr(client, "_ready", True, raising=False)
@@ -239,6 +296,7 @@ async def test_pool_scales_the_shared_pace(monkeypatch):
     )
     assert client.bot_session_count == 4
     monkeypatch.setattr(settings, "request_delay", 3.0)
+    client._pace_multiplier = 1.0
 
     limiter = RateLimiter(min_interval=3.0)
     checker = UsernameChecker(
@@ -247,8 +305,36 @@ async def test_pool_scales_the_shared_pace(monkeypatch):
     )
     await checker.check_free_candidate("whatever")
 
-    # 3.0s per account, divided by 4 sessions, times the 1.5x safety margin.
-    assert limiter.min_interval == pytest.approx(3.0 * 1.5 / 4)
+    # 3.0s per account, divided by 4 sessions, times the 2x safety margin.
+    assert limiter.min_interval == pytest.approx(3.0 * 2.0 / 4)
+
+
+def test_flood_backs_the_pool_pace_off_and_it_recovers(monkeypatch):
+    """Fresh bot accounts carry smaller quotas than seasoned ones: the pool
+    must learn from FloodWaits (doubling its interval) and recover after a
+    quiet period instead of staying slow forever."""
+    import asyncio
+
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", FakeClient(lambda r: _occupied_response()), raising=False)
+    monkeypatch.setattr(client, "_bot_clients", [], raising=False)
+    monkeypatch.setattr(settings, "request_delay", 3.0)
+    client._pace_multiplier = 1.0
+
+    base = client.call_interval
+    assert base == pytest.approx(3.0 * 2.0)
+
+    # A flood doubles the interval; another one doubles it again.
+    client._park("main", 60)
+    assert client.call_interval == pytest.approx(base * 2)
+    client._park("main", 60)
+    assert client.call_interval == pytest.approx(base * 4)
+
+    # Ten flood-free minutes recover the full speed.
+    client._last_flood_at = asyncio.get_event_loop().time() - 601
+    assert client.call_interval == pytest.approx(base)
+    assert client._pace_multiplier == 1.0
 
 
 # ------------------------------------------------- fragment (fragment.* calls)

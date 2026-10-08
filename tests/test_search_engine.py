@@ -480,27 +480,68 @@ async def test_finder_aborts_immediately_on_a_long_flood_wait(bot):
     assert attempt.username == ""
 
 
-async def test_finder_aborts_when_throttled_mid_run(bot):
-    """A FloodWait that lands part-way through must stop the run, not sleep it off."""
+async def test_finder_waits_out_a_throttle_instead_of_giving_up(bot, monkeypatch):
+    """A throttle mid-run is waited out, never turned into a dead end.
+
+    This is the regression behind "the bot keeps answering with 'Telegram is
+    limiting us'": a FloodWait used to end the run, so a user got an excuse
+    instead of a name. Now the search holds on, asks again, and delivers the
+    free name it was after.
+    """
+    from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult
 
-    # The page cannot rule names out, so each survivor reaches MTProto.
+    # The page cannot rule names out, so each survivor reaches the authoritative
+    # check - and the first two of those come back limited.
     checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
 
     seen = 0
 
-    async def throttling(name):
+    async def throttling_then_free(name):
         nonlocal seen
         seen += 1
-        if seen >= 3:
+        if seen <= 2:
             return CheckResult(
                 username=name, status=CheckStatus.RATE_LIMITED,
                 source="mtproto", reason="flood_wait",
             )
-        return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
 
-    checker.confirm_availability = throttling
+    checker.confirm_availability = throttling_then_free
+    finder = UsernameFinder(checker, None)
+
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=7)), timeout=5
+    )
+
+    # It did not stop on the throttle: it waited, retried, and produced a name.
+    assert attempt.hit is True
+    assert attempt.reason == "free_found"
+    assert attempt.username
+    assert seen >= 3
+
+
+async def test_finder_reports_throttled_only_when_waiting_stops_helping(bot, monkeypatch):
+    """The honest last resort, for the case where Telegram refuses for longer
+    than a search may last. It must stay reachable - but only as a last resort."""
+    from app.search import finder as finder_module
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    monkeypatch.setattr(finder_module, "FLOOD_RETRY_PAUSE", 0.01)
+    # A search is not allowed to sit on the throttle for ever.
+    monkeypatch.setattr(finder_module, "MAX_SEARCH_SECONDS", 0.05)
+
+    async def always_limited(name):
+        return CheckResult(
+            username=name, status=CheckStatus.RATE_LIMITED,
+            source="mtproto", reason="flood_wait",
+        )
+
+    checker.confirm_availability = always_limited
     finder = UsernameFinder(checker, None)
 
     attempt = await asyncio.wait_for(
@@ -509,8 +550,46 @@ async def test_finder_aborts_when_throttled_mid_run(bot):
 
     assert attempt.reason == "throttled"
     assert attempt.username == ""
-    assert seen == 3
+    assert attempt.hit is False
     assert attempt.generated_tries > 1, "the search gave up without trying"
+
+
+async def test_unlimited_mode_still_funds_the_guarantee_pass(bot, monkeypatch):
+    """In unlimited mode the valuable pass used to claim ``min(500, budget)`` -
+    which *is* the whole budget - so the guarantee pass never ran and the search
+    ended in "everything is taken" while free coinages were still out there.
+    The valuable stream must stay a share, not the whole allowance.
+    """
+    from app.search import finder as finder_module
+    from app.search.pattern import _WORD_SET
+    from app.services.runtime_config import runtime
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+
+    monkeypatch.setattr(runtime, "_overrides", {"unlimited_search": True})
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+
+    async def words_taken(name: str) -> CheckResult:
+        if name in _WORD_SET:
+            return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
+
+    checker.confirm_availability = words_taken
+    finder = UsernameFinder(checker, None)
+
+    # The reservation really is a share, not the whole ceiling.
+    budget = finder._confirm_budget(SearchCriteria(length=6))
+    assert finder_module.UNLIMITED_SHORT_CONFIRM_BUDGET == budget
+    assert max(finder_module.VALUABLE_CONFIRM_BUDGET, budget // 4) < budget
+
+    attempt = await asyncio.wait_for(
+        finder.find_one(SearchCriteria(length=6)), timeout=10
+    )
+
+    assert attempt.hit is True
+    assert attempt.username
+    assert attempt.username not in _WORD_SET
 
 
 # --------------------------------------------------------------------------- battle
