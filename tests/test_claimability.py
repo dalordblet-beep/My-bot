@@ -106,6 +106,39 @@ async def test_unverified_names_are_never_delivered_as_results(monkeypatch):
     assert attempt.reason == "claim_unavailable"
 
 
+async def test_a_dead_gate_aborts_the_hunt_instead_of_burning_the_budget(monkeypatch):
+    """A FloodWait-parked gate cannot verify anything: hunting on behind it
+    looks like an infinite search. One unverified confirm must be enough to
+    stop the run with the honest 'cannot verify' screen."""
+    from app.telegram import mtproto as mtproto_module
+
+    monkeypatch.setattr(settings_, "allow_bot_api_availability", True)
+    client = mtproto_module.mtproto_client
+    # Park the user session exactly as a FloodWait does.
+    monkeypatch.setattr(
+        client, "_user_clients",
+        [{"name": "t", "client": None, "ready": True, "cooldown_until": float("inf")}],
+        raising=False,
+    )
+
+    checker = UsernameChecker(
+        cache=None, bot=None, page_probe=FakePageProbe(state="free")
+    )
+    confirmed = 0
+
+    async def unverified(name):
+        nonlocal confirmed
+        confirmed += 1
+        return _available(name, "claimability_unverified")
+
+    checker.confirm_availability = unverified
+    attempt = await UsernameFinder(checker, None).find_one(SearchCriteria(length=8))
+
+    assert confirmed == 1
+    assert attempt.hit is False
+    assert attempt.reason == "claim_unavailable"
+
+
 async def test_verified_hit_stops_the_search_immediately(monkeypatch):
     monkeypatch.setattr(settings_, "allow_bot_api_availability", True)
 

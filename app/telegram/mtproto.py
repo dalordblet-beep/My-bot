@@ -175,6 +175,19 @@ class MtprotoClient:
         return any(entry["ready"] for entry in self._user_clients)
 
     @property
+    def user_gate_ready(self) -> bool:
+        """True when a user session can answer checkUsername *right now*.
+
+        A loaded-but-FloodWait-parked session cannot verify anything, so the
+        caller must not keep hunting behind a gate that is temporarily down.
+        """
+        now = asyncio.get_event_loop().time()
+        return any(
+            entry["ready"] and entry["cooldown_until"] <= now
+            for entry in self._user_clients
+        )
+
+    @property
     def user_session_count(self) -> int:
         return sum(1 for entry in self._user_clients if entry["ready"])
 

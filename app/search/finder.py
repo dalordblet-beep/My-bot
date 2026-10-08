@@ -423,11 +423,23 @@ class UsernameFinder:
                     if getattr(basic, "detail", None) == "claimability_unverified":
                         # Not a provable win: "nobody owns it" is proven, but
                         # "Telegram will hand it over" is not. Keep hunting for
-                        # a verifiable name; unverifiable candidates are only
-                        # reported at the very end - as an honest "cannot
-                        # verify", never as a free result.
+                        # a verifiable name while the gate is alive - but the
+                        # moment the gate is down (no session, or every one
+                        # FloodWait-parked), stop immediately: burning the
+                        # whole budget behind a dead gate looks like an
+                        # infinite search and changes nothing.
                         if state.unverified_hit is None:
                             state.unverified_hit = attempt
+                        if not mtproto_client.user_gate_ready:
+                            logger.warning(
+                                "search aborted: claimability gate is down "
+                                "(user session missing or flood-parked)"
+                            )
+                            return FindAttempt(
+                                username="", premium=premium_rating(""), hit=False,
+                                reason="claim_unavailable",
+                                generated_tries=state.screened,
+                            )
                         continue
                     return attempt
 
