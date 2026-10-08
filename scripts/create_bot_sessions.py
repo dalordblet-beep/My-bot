@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
 import random
 import re
 import sys
@@ -40,7 +39,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings  # noqa: E402
-from app.telegram.mtproto import _session_file  # noqa: E402
+from app.telegram.mtproto import _session_file, bot_running_locally  # noqa: E402
 from app.utils.logging_setup import setup_logging  # noqa: E402
 
 BOTFATHER = "BotFather"
@@ -60,12 +59,11 @@ THROTTLE_RE = re.compile(r"too many attempts.*?(\d+)\s*second", re.IGNORECASE)
 def _load_user_client():
     """The *user* session - BotFather only talks to real accounts, not bots.
 
-    The running bot already holds this session file open, and two Telethon
-    clients must never share one session database, so the script works on a copy
-    and deletes it afterwards. The authorisation is the same either way.
+    The session file is opened directly, with no copy: a copy carries the same
+    auth key, and Telegram invalidates a key used from two IP addresses at the
+    same time (``AuthKeyDuplicatedError``) - permanently, taking the claimability
+    gate with it. That is why ``main()`` refuses to run while a bot is up.
     """
-    import shutil
-
     from telethon import TelegramClient
 
     for name in settings.user_session_names:
@@ -74,22 +72,8 @@ def _load_user_client():
         path = _session_file(name)
         if not path.exists():
             continue
-        working = path.with_name(f"{path.stem}__botfather.session")
-        for suffix in ("", "-journal", "-wal", "-shm"):
-            source = Path(f"{path}{suffix}")
-            if source.exists():
-                shutil.copyfile(source, Path(f"{working}{suffix}"))
-        return TelegramClient(str(working), settings.api_id, settings.api_hash), working
+        return TelegramClient(str(path), settings.api_id, settings.api_hash), path
     return None, None
-
-
-def _drop_working_copy(working) -> None:
-    """Remove the throwaway session copy (and its journal) after the run."""
-    if working is None:
-        return
-    for suffix in ("", "-journal", "-wal", "-shm"):
-        with contextlib.suppress(OSError):
-            Path(f"{working}{suffix}").unlink()
 
 
 async def _ask(client, text: str, timeout: float = REPLY_TIMEOUT) -> str:
@@ -202,9 +186,24 @@ async def main() -> int:
     parser.add_argument("--count", type=int, default=10, help="how many bots to create")
     parser.add_argument("--base", default="moged", help="username stem for the new bots")
     parser.add_argument("--no-apply", action="store_true", help="print tokens, do not touch .env")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="run even though a bot is running on this machine (dangerous)",
+    )
     args = parser.parse_args()
 
     setup_logging()
+
+    # Telegram invalidates an auth key used from two IPs at once - permanently.
+    # That kills the claimability gate, so refuse rather than risk it.
+    if bot_running_locally() and not args.force:
+        print(
+            "A bot is running on this machine and holds the user session.\n"
+            "Stop it first, then run this again (or pass --force if you are sure).\n"
+            "Telegram invalidates a session used from two IP addresses at once,\n"
+            "and the claimability gate dies with it."
+        )
+        return 3
 
     client, working = _load_user_client()
     if client is None:
@@ -214,12 +213,11 @@ async def main() -> int:
         )
         return 2
 
-    print(f"using a working copy of {working}")
+    print(f"using user session {working}")
     await client.connect()
     if not await client.is_user_authorized():
         print("that session is not authorised - re-run the login steps")
         await client.disconnect()
-        _drop_working_copy(working)
         return 2
 
     from telethon.errors import FloodWaitError

@@ -37,6 +37,26 @@ _PACE_BASE_MARGIN = 2.0
 JOIN_REQUEST_SCAN_LIMIT = 100
 
 
+def bot_running_locally() -> bool:
+    """True when a bot process on THIS machine holds the single-instance lock.
+
+    Only a local bot can be detected this way; a bot on a hosting is invisible
+    from here. Scripts that connect the user session use this as a tripwire, not
+    as proof - see the warning they print.
+    """
+    from app.utils.singleton import AlreadyRunning, SingleInstance
+
+    if not settings.bot_token:
+        return False
+    lock = SingleInstance(settings.bot_token)
+    try:
+        lock.acquire()
+    except AlreadyRunning:
+        return True
+    lock.release()
+    return False
+
+
 def _session_file(name: str, root: Path | None = None) -> Path:
     """Locate a session file: working directory first, then the project root.
 
@@ -440,9 +460,43 @@ class MtprotoClient:
             return self.user_ready
 
         self._materialise_session_data()
-
         names = settings.user_session_names
-        found = 0
+
+        # Two passes at most. A session Telegram has invalidated is deleted - it
+        # is worthless, and leaving it in place would also block a fresh session
+        # from being written, because a file on disk wins over the
+        # MTPROTO_USER_SESSION_DATA env var (which is how a container hosting is
+        # updated). Deleting it lets the env var be materialised and the second
+        # pass load it.
+        for attempt in range(2):
+            dropped = await self._load_user_sessions(names)
+            if not dropped or attempt == 1:
+                break
+            self._materialise_session_data()
+
+        found = len(self._user_clients)
+        if found:
+            logger.info("user session pool ready (%d account(s)) - claimability on", found)
+        else:
+            # This is the exact failure behind "the bot reports taken/cooldown
+            # names as free": without this session account.checkUsername cannot
+            # run. Say precisely where the file was expected.
+            logger.warning(
+                "no user session found - claimability check stays OFF. Searched "
+                "the working directory (%s) and the project root (%s) for %s. "
+                "Copy username_scanner_user.session into one of those folders "
+                "(exact name, no double .session extension) and restart.",
+                Path.cwd(), PROJECT_ROOT, " or ".join(f"{n}.session" for n in names) or "-",
+            )
+        return self.user_ready
+
+    async def _load_user_sessions(self, names: list[str]) -> bool:
+        """Load every configured user session.
+
+        Returns True when a session Telegram had invalidated was dropped, so the
+        caller can re-materialise from the env var and try once more.
+        """
+        dropped = False
         for name in names:
             if not name:
                 continue
@@ -463,39 +517,40 @@ class MtprotoClient:
                 self._user_clients.append(
                     {"name": name, "client": client, "ready": True, "cooldown_until": 0.0}
                 )
-                found += 1
             except Exception as exc:
                 cls = type(exc).__name__
                 if "AuthKeyDuplicated" in cls:
                     # Telegram invalidated the key because the same session file
-                    # was used from two IP addresses at once. The file is dead
-                    # for good, and retrying it will never work - so say exactly
-                    # what to do rather than leaving the gate silently off.
+                    # was used from two IP addresses at once. It can never be
+                    # reused, so it is removed rather than retried for ever - and
+                    # removing it is also what lets a good session from the env
+                    # var take its place.
                     logger.error(
-                        "user session %s was invalidated by Telegram (the same "
-                        "session file was used from two different IP addresses). "
-                        "It cannot be reused - delete %s and log in again:\n"
+                        "user session %s was invalidated by Telegram: the same "
+                        "session file was used from two different IP addresses at "
+                        "once. The file is dead for good and is being deleted. "
+                        "Log in again:\n"
                         "  python scripts/login_user_steps.py send <phone>\n"
-                        "  python scripts/login_user_steps.py sign <code>",
-                        name, path,
+                        "  python scripts/login_user_steps.py sign <code>\n"
+                        "  python scripts/export_user_session.py   (for a hosting)",
+                        name,
                     )
+                    self._drop_session_files(name)
+                    dropped = True
                     continue
                 logger.warning("could not start user session %s: %s", name, exc)
+        return dropped
 
-        if found:
-            logger.info("user session pool ready (%d account(s)) - claimability on", found)
-        else:
-            # This is the exact failure behind "the bot reports taken/cooldown
-            # names as free": without this session account.checkUsername cannot
-            # run. Say precisely where the file was expected.
-            logger.warning(
-                "no user session found - claimability check stays OFF. Searched "
-                "the working directory (%s) and the project root (%s) for %s. "
-                "Copy username_scanner_user.session into one of those folders "
-                "(exact name, no double .session extension) and restart.",
-                Path.cwd(), PROJECT_ROOT, " or ".join(f"{n}.session" for n in names) or "-",
-            )
-        return self.user_ready
+    @staticmethod
+    def _drop_session_files(name: str) -> None:
+        """Delete a session Telegram has invalidated - it can never be reused."""
+        base = _session_file(name)
+        for path in (base, Path(f"{base}-journal")):
+            try:
+                if path.exists():
+                    path.unlink()
+            except OSError as exc:  # pragma: no cover - filesystem dependent
+                logger.debug("could not remove %s: %s", path, exc)
 
     async def check_username(self, username: str) -> bool | None:
         """Authoritative assignability test via the user-only checkUsername.

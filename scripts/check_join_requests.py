@@ -2,102 +2,102 @@
 
 The onboarding gate lets a user through when they have *joined* a required
 channel. When the channel is private and join requests are approved by hand, a
-user who has already sent a request is still not a member - so the gate has to
-look at the request queue as well. That only works when the bot is an
-administrator of the chat, which is exactly what this script reports.
+user who has already sent a request is still not a member - so the gate counts a
+pending request as a subscription too. Reading that request queue is what this
+script verifies, per channel.
 
-Usage (from the project root):
     python scripts/check_join_requests.py
+
+WHY IT INSISTS THE BOT IS STOPPED
+---------------------------------
+Reading the queue needs the **user** session, and Telegram invalidates an auth
+key that is used from two IP addresses at the same time - permanently, taking
+the claimability gate down with it:
+
+    AuthKeyDuplicatedError: ... used under two different IP addresses
+    simultaneously, and can no longer be used.
+
+That is not theoretical; it has happened once here. So the script refuses to run
+while a bot holds the single-instance lock on this machine, and it warns about a
+bot running elsewhere, which it cannot see. Stop the bot first - it takes a few
+seconds to restart.
 """
 
 from __future__ import annotations
 
+import argparse
 import asyncio
-import shutil
 import sys
-from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.config import settings  # noqa: E402
 from app.services.subscriptions import required_subs  # noqa: E402
-from app.telegram.mtproto import _session_file  # noqa: E402
+from app.telegram.mtproto import _session_file, bot_running_locally  # noqa: E402
 from app.utils.logging_setup import setup_logging  # noqa: E402
 
-
-async def _session_copy(base: str):
-    """A throwaway copy of a session - the live bot holds the original open."""
-    path = _session_file(base)
-    if not path.exists():
-        return None, None
-    working = path.with_name(f"{path.stem}__probe.session")
-    for suffix in ("", "-journal", "-wal", "-shm"):
-        source = Path(f"{path}{suffix}")
-        if source.exists():
-            shutil.copyfile(source, Path(f"{working}{suffix}"))
-    return path, working
-
-
-async def _bot_client():
-    from telethon import TelegramClient
-
-    _, working = await _session_copy(settings.mtproto_session)
-    if working is None:
-        return None, None
-    client = TelegramClient(str(working), settings.api_id, settings.api_hash)
-    await client.start(bot_token=settings.bot_token)
-    return client, working
+WARNING = (
+    "!! Telegram kills a session used from two IP addresses at once, and the\n"
+    "!! claimability gate dies with it. Make sure the bot is NOT running\n"
+    "!! anywhere (this machine or a hosting) before continuing."
+)
 
 
 async def _user_client():
-    """The user session: the ONLY one that can read join requests.
+    """Open the user session - the ONLY one that can read join requests.
 
     ``messages.getChatInviteImporters`` is refused to bots outright
-    (BotMethodInvalidError - verified live), exactly like account.checkUsername,
-    so the request queue is readable only by a real account. That account has to
-    be an administrator of the channel.
+    (``BotMethodInvalidError`` - verified live), exactly like
+    ``account.checkUsername``, so the request queue is readable only by a real
+    account. That account has to be an administrator of the channel.
     """
     from telethon import TelegramClient
 
     for name in settings.user_session_names:
         if not name:
             continue
-        _, working = await _session_copy(name)
-        if working is None:
+        path = _session_file(name)
+        if not path.exists():
             continue
-        client = TelegramClient(str(working), settings.api_id, settings.api_hash)
+        client = TelegramClient(str(path), settings.api_id, settings.api_hash)
         await client.connect()
         if not await client.is_user_authorized():
             await client.disconnect()
-            _drop(working)
             continue
-        return client, working
+        return client, path
     return None, None
 
 
-def _drop(working) -> None:
-    if working is None:
-        return
-    for suffix in ("", "-journal", "-wal", "-shm"):
-        try:
-            Path(f"{working}{suffix}").unlink()
-        except OSError:
-            pass
-
-
 async def main() -> int:
+    parser = argparse.ArgumentParser(description="Check the join-request queues")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="run even though a bot is running on this machine (dangerous)",
+    )
+    args = parser.parse_args()
+
     setup_logging()
 
-    from telethon.tl.functions.messages import GetChatInviteImportersRequest
-    from telethon.tl.types import InputUserEmpty
+    if bot_running_locally() and not args.force:
+        print(
+            "A bot is running on this machine and holds the session.\n"
+            "Stop it, then run this again (or pass --force if you are sure).\n\n"
+            f"{WARNING}"
+        )
+        return 3
+    print(WARNING)
+    print()
 
     subs = required_subs()
     if not subs:
         print("no required subscriptions configured - nothing to check")
         return 0
 
-    client, working = await _user_client()
+    from telethon.tl.functions.messages import GetChatInviteImportersRequest
+    from telethon.tl.types import InputUserEmpty
+
+    client, path = await _user_client()
     if client is None:
         print(
             "No user session available. Reading join requests needs a real "
@@ -107,7 +107,7 @@ async def main() -> int:
 
     try:
         me = await client.get_me()
-        print(f"session: @{getattr(me, 'username', '?')} (user account)\n")
+        print(f"session: {path}  ->  @{getattr(me, 'username', '?')} (user account)\n")
         for sub in subs:
             if not sub.configured:
                 print(f"[{sub.key}] not configured - skipped")
@@ -121,7 +121,7 @@ async def main() -> int:
             try:
                 result = await client(
                     GetChatInviteImportersRequest(
-                        peer=peer, offset_date=datetime(1970, 1, 1),
+                        peer=peer, offset_date=None,
                         offset_user=InputUserEmpty(), limit=100, requested=True,
                     )
                 )
@@ -137,13 +137,11 @@ async def main() -> int:
             importers = list(result.importers or [])
             print(
                 f"[{sub.key}] {ref}: OK - {len(importers)} pending request(s)"
-                + (" (showing up to 5)" if importers else "")
             )
             for importer in importers[:5]:
                 print(f"    user_id={importer.user_id}")
     finally:
         await client.disconnect()
-        _drop(working)
     return 0
 
 
