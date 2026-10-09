@@ -182,8 +182,11 @@ async def test_queue_worker_delivers_the_result_into_the_same_message(
     finally:
         await search_queue.stop()
 
-    # The result replaced the "queued" text in the very same message.
-    assert "RESULT" in mock_session.last_edited_text().upper()
+    # The result replaced the "queued" text in the very same message. The hit
+    # card is the bare one now: the name and the premium criteria, no title.
+    delivered = mock_session.last_edited_text()
+    assert "<b>@" in delivered.lower()
+    assert "premium quality" in delivered.lower()
 
 
 async def test_queue_does_not_duplicate_an_identical_pending_search(

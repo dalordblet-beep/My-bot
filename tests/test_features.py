@@ -385,12 +385,12 @@ async def test_queue_worker_delivers_variants_result(
 
 # --------------------------------------------------------------------------- keyboards
 def test_claim_kit_keyboard_open_url_and_actions():
+    """Save / variants / new search - and NO "open" url button (removed by
+    request: the card is the result, not a landing page)."""
     markup = claim_kit_keyboard("en", "love", 5)
     buttons = [b for row in markup.inline_keyboard for b in row]
 
-    open_btn = next(b for b in buttons if b.url)
-    assert open_btn.url == "https://t.me/love"
-    assert open_btn.style == "success"
+    assert not any(b.url for b in buttons), "the open-nick button must be gone"
 
     save_btn = next(b for b in buttons if b.callback_data and b.callback_data.startswith(cb.FAV_ADD_PREFIX))
     assert "love" in save_btn.callback_data
@@ -402,10 +402,10 @@ def test_claim_kit_keyboard_open_url_and_actions():
     assert variants_btn.style == "primary"
 
     new_btn = next(b for b in buttons if b.callback_data == cb.MENU_SEARCH_ENGINE)
-    assert new_btn.style is None          # NEUTRAL renders as no style
+    assert new_btn.style == "primary"
 
-    styles = {b.style for b in buttons}
-    assert styles <= {"primary", "success", "danger", None}
+    # One colour across the whole kit - the anti-rainbow rule.
+    assert {b.style for b in buttons} == {"primary"}
 
 
 def test_variants_keyboard_reroll_and_exit():

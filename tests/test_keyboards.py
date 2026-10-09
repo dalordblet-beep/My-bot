@@ -184,6 +184,12 @@ def test_callback_data_is_within_telegram_limit(lang: str):
 
 
 def test_main_menu_colours_are_semantic():
+    """One colour per screen: every action renders primary, nav stays neutral.
+
+    The old semantic scheme (blue/green/red mixed in one view) is gone by
+    request - the "rainbow" look. Roles still exist so an admin theme can
+    split the colours again.
+    """
     markup = main_menu_keyboard("en")
     by_label = {button.text: button.style for button in _all_buttons(markup)}
 
@@ -193,7 +199,7 @@ def test_main_menu_colours_are_semantic():
         )
 
     assert style_of("Search") == "primary"
-    assert style_of("Battle") == "danger"
+    assert style_of("Battle") == "primary"
     assert style_of("Profile") == "primary"
     assert style_of("Support") is None
     assert style_of("Settings") is None
@@ -238,10 +244,13 @@ def test_username_watch_has_its_own_main_menu_entry():
 
 
 def test_destructive_actions_are_red():
+    """Destructive actions follow the one-colour rule too: primary, like the
+    rest. The icon ("ban") carries the meaning; the admin theme can restore
+    the red split if it is ever wanted back."""
     markup = user_profile_keyboard("en", USER)
     by_label = {button.text: button.style for button in _all_buttons(markup)}
     block = next(style for text, style in by_label.items() if text.endswith("Block"))
-    assert block == "danger"
+    assert block == "primary"
 
 
 def test_buttons_are_iconed():

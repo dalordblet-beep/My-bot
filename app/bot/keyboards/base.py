@@ -1,11 +1,13 @@
 """Shared helpers for keyboards.
 
-Button colour IS supported by the Bot API - ``InlineKeyboardButton.style``
-accepts exactly three values, verified against Telegram's servers:
+Visual rule of the bot: **one colour per screen**. Every action button
+renders in the same primary style; icons carry the meaning, not colour. A
+muted row (nav, back) uses the neutral default. The three Bot API styles stay
+available because the admin theme can remap roles at runtime - but the
+out-of-the-box theme maps them all to one.
 
-    primary  blue    main navigation, lookups, lists
-    success  green   positive / safe / confirm
-    danger   red     destructive, or the flagship action
+    primary  blue    everything: navigation, lookups, lists, confirms
+    danger   red     unused by default (mapped to primary); admin theme may restore it
     None     neutral default styling (back, settings, history)
 
 (aiogram also exposes ``ButtonStyle.LINK``, but Telegram rejects it for
@@ -36,10 +38,13 @@ _STYLE_BY_NAME = {
     "danger": ButtonStyle.DANGER,
     "neutral": None,
 }
+# The shipped look: success and danger roles also render as primary, so a
+# screen never shows blue, green AND red buttons at once - the "rainbow". An
+# admin can still split them again via the runtime button theme.
 _THEME = {
     "primary": ButtonStyle.PRIMARY,
-    "success": ButtonStyle.SUCCESS,
-    "danger": ButtonStyle.DANGER,
+    "success": ButtonStyle.PRIMARY,
+    "danger": ButtonStyle.PRIMARY,
     "neutral": None,
 }
 _ROLE_OF = {

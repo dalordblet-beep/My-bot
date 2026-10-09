@@ -21,14 +21,29 @@ from app.services.runtime_config import runtime
 
 @pytest.fixture
 def clean_overrides():
-    """Isolate runtime overrides and the i18n label cache per test."""
+    """Isolate runtime overrides, the i18n label cache and the button theme."""
     saved = dict(runtime._overrides)
     saved_labels = dict(i18n._LABEL_OVERRIDES)
+    saved_theme = dict(base._THEME)
     yield
     runtime._overrides.clear()
     runtime._overrides.update(saved)
     i18n._LABEL_OVERRIDES.clear()
     i18n._LABEL_OVERRIDES.update(saved_labels)
+    base._THEME.clear()
+    base._THEME.update(saved_theme)
+
+
+def test_default_theme_is_one_colour():
+    """The shipped look: every role renders primary - no rainbow screens.
+
+    success and danger exist only so an admin theme can split them again;
+    out of the box a screen never shows blue, green and red buttons at once.
+    """
+    assert base._THEME["primary"] is ButtonStyle.PRIMARY
+    assert base._THEME["success"] is ButtonStyle.PRIMARY
+    assert base._THEME["danger"] is ButtonStyle.PRIMARY
+    assert base._THEME["neutral"] is None
 
 
 def test_custom_labels_rename_any_key(clean_overrides):

@@ -258,7 +258,13 @@ async def test_search_without_the_claimability_gate_answers_from_public_pages(mo
     assert attempt.basic.detail == "claimability_unverified"
 
 
-async def test_result_screen_carries_the_caveat():
+async def test_result_screen_is_the_bare_card():
+    """The hit card is the name and the criteria, nothing else.
+
+    The caveat ("claimability not verified") used to be spelled out on the
+    card; the user asked for a bare result and the caveats now live in the log
+    instead of the user's face. The card must not grow them back.
+    """
     from app.bot import texts
     from app.search.pattern import premium_rating
 
@@ -276,11 +282,17 @@ async def test_result_screen_carries_the_caveat():
         fragment_checked = True
 
     body = texts._find_result_body("en", _Attempt(), 1)
-    assert "not verified" in body.lower()
+    assert "recap" in body
+    assert "not verified" not in body.lower()
+    assert "fragment" not in body.lower()
 
 
-async def test_result_screen_says_when_the_verdict_is_from_public_sources():
-    """A public-path hit must be labelled as such, never as Telegram's own word."""
+async def test_result_screen_is_bare_even_for_a_public_verdict():
+    """A public-path hit renders the same bare card - no provenance essay.
+
+    The user asked for the name and the criteria only. Where the verdict came
+    from is a technical matter for the log, not for the result screen.
+    """
     from app.bot import texts
     from app.search.pattern import premium_rating
 
@@ -300,8 +312,8 @@ async def test_result_screen_says_when_the_verdict_is_from_public_sources():
         public_reason = "no_public_trace_anywhere"
 
     body = texts._find_result_body("en", _Attempt(), 1)
-    assert "public" in body.lower()
     assert "vudote" in body
+    assert "public" not in body.lower()
 
 
 async def test_result_screen_says_when_a_public_miss_was_reached_publicly():

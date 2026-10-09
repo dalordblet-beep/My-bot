@@ -481,8 +481,12 @@ EN: dict[str, str] = {
     "search.pn_readable": "Not readable out loud",
     "search.pn_dictionary": "Not a dictionary word",
     "search.premium_badge": "Premium quality: {value}/5",
-    "search.premium_ok": "{check} {label}",
-    "search.premium_no": "{cross} {label}",
+    # Monochrome markers on purpose: the big coloured check/cross emoji do
+    # not share one visual style, and a criteria list should read like a
+    # checklist, not a fruit stand. U+2713 / U+2717 render identically
+    # everywhere and in one colour.
+    "search.premium_ok": "✓ {label}",
+    "search.premium_no": "✗ {label}",
     "search.premium_note": (
         "<i>The bot only shows beautiful, unoccupied usernames worth reselling - "
         "each is judged on 5 criteria and scored N/5.</i>"
@@ -1404,8 +1408,8 @@ RU: dict[str, str] = {
     "search.pn_readable": "Не читается вслух",
     "search.pn_dictionary": "Не словарное слово",
     "search.premium_badge": "Премиум-качество: {value}/5",
-    "search.premium_ok": "{check} {label}",
-    "search.premium_no": "{cross} {label}",
+    "search.premium_ok": "✓ {label}",
+    "search.premium_no": "✗ {label}",
     "search.premium_note": (
         "<i>Бот показывает только красивые, незанятые имена, годные для перепродажи — "
         "каждое оценивается по 5 критериям и получает N/5.</i>"

@@ -351,17 +351,13 @@ def claim_kit_keyboard(lang: str, username: str, premium_total: int) -> InlineKe
 
     A free name is only useful if the user can take it, and usernames are
     first-come-first-served, so the moment of the result is the moment to act:
-    open it on Telegram, save it, hunt close alternatives, or start a new
-    search. The "Open" button is a real ``url`` button - one tap from the result
-    to the profile - while the rest are the usual inline actions.
+    save it, hunt close alternatives, or start a new search. No "open" url
+    button - the card is the result, not a landing page, and the name is right
+    there to copy.
     """
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                btn(
-                    t(lang, "btn.open"), icon="link", style=SUCCESS,
-                    url=f"https://t.me/{username}",
-                ),
                 btn(
                     t(lang, "btn.save"), icon="star", style=PRIMARY,
                     callback_data=f"{cb.FAV_ADD_PREFIX}:{username}:{premium_total}",
@@ -373,7 +369,7 @@ def claim_kit_keyboard(lang: str, username: str, premium_total: int) -> InlineKe
                     callback_data=f"{cb.FIND_VARIANTS_PREFIX}:{username}",
                 ),
                 btn(
-                    t(lang, "btn.new_search"), icon="search", style=NEUTRAL,
+                    t(lang, "btn.new_search"), icon="search", style=PRIMARY,
                     callback_data=cb.MENU_SEARCH_ENGINE,
                 ),
             ],

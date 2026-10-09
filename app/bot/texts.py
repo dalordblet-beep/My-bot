@@ -813,12 +813,23 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
             f"{t(lang, 'search.no_candidate')}"
         )
 
+    # The hit card is deliberately bare: the name, then the quality criteria.
+    # Everything else the old card carried - "it is free", Fragment double-check
+    # notes, price comparables, the claim kit - was noise. The fact that the
+    # name is free is the only reason the search returned at all; saying it in
+    # four different ways did not make the result more trustworthy, only longer.
+    if attempt.hit:
+        return (
+            f"<b>@{esc(attempt.username)}</b>\n\n"
+            + "\n".join(premium_block(lang, attempt.premium))
+        )
+
     lines = [
         t(lang, "search.result_title"),
         "",
         f"<b>@{esc(attempt.username)}</b>",
         "",
-        t(lang, "search.hit_free") if attempt.hit else t(lang, "search.miss_free"),
+        t(lang, "search.miss_free"),
     ]
 
     if attempt.basic is not None and attempt.basic.status is CheckStatus.OCCUPIED:
@@ -827,66 +838,8 @@ def _find_result_body(lang: str, attempt, attempts_used: int) -> str:
         if attempt.basic.title:
             lines.append(t(lang, "result.title_field", value=esc(attempt.basic.title)))
 
-    # The Fragment half of the double check, stated explicitly. A confirmed-free
-    # name is only ever shown when Fragment does not list it for sale, so this
-    # line is the proof of the second check - and says so honestly when the
-    # marketplace could not be reached.
-    if attempt.hit:
-        lines.append(
-            t(lang, "search.fragment_ok") if attempt.fragment_checked
-            else t(lang, "search.fragment_off")
-        )
-        # Claimability could not be verified (no user session on this machine):
-        # "nobody owns it" is proven, "Telegram will hand it over" is not.
-        basic_detail = getattr(attempt.basic, "detail", None)
-        if basic_detail == "claimability_unverified":
-            lines.append(t(lang, "search.claim_unverified"))
-        # The verdict came from the session-free public path (t.me + Fragment)
-        # rather than from Telegram itself. Say so plainly: the name is real and
-        # the classification is honest, but it is not Telegram's own answer.
-        if getattr(attempt, "public_confidence", None) == "public":
-            lines.append(t(lang, "search.public_verdict"))
-
-    if attempt.value is not None:
-        val = attempt.value
-        price = val.get("price")
-        if price:
-            # Show what the number rests on. A bare "≈150 TON" reads as a
-            # valuation of *this* name; the spread and the number of live
-            # listings behind the median make it what it really is - an asking
-            # price for comparable names on Fragment right now.
-            lines.append(
-                t(
-                    lang, "value.estimate",
-                    price=f"{price:,}",
-                    low=f"{val.get('price_low') or price:,}",
-                    high=f"{val.get('price_high') or price:,}",
-                    n=val.get("price_comps") or 0,
-                )
-            )
-        else:
-            # No comparable listing exists, so there is no price. Saying so is
-            # the honest answer - a substituted figure would be an invention.
-            lines.append(t(lang, "value.no_market"))
-        if val.get("wordlike"):
-            lines.append(t(lang, "value.wordlike"))
-
-    # The claim kit: a free name is only useful if the user can take it, and a
-    # username is first-come-first-served, so the moment of the result is the
-    # moment to act. Copyable handle plus the reminder to go and do it.
-    if attempt.hit:
-        lines += [
-            "",
-            t(lang, "claim.handle", name=esc(attempt.username)),
-            t(lang, "claim.note"),
-        ]
-
-    lines += [""] + premium_block(lang, attempt.premium)
     lines.append(t(lang, "search.attempts", n=attempts_used))
-
-    if not attempt.hit:
-        lines += ["", t(lang, "search.hint_short")]
-
+    lines += ["", t(lang, "search.hint_short")]
     return "\n".join(lines)
 
 
