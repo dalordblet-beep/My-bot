@@ -34,6 +34,12 @@ logger = get_logger(__name__)
 
 # Shared across the whole process so a mass scan cannot outrun the limiter.
 shared_rate_limiter = RateLimiter(min_interval=settings.request_delay)
+
+# How long the shared limiter's pause window may be absorbed by a Bot API
+# probe. The pause belongs to the MTProto pool (a resolveUsername FloodWait);
+# the Bot API is a different channel with its own quota, so an MTProto ban
+# must not freeze an account-free probe behind hours of someone else's wait.
+_BOT_API_ABSORB_PAUSE = 5.0
 shared_flood_budget = FloodWaitBudget()
 
 
@@ -394,7 +400,12 @@ class UsernameChecker:
                 reason="no_checker_available", detail=prior_reason,
             )
 
-        await self._limiter.acquire()
+        # Absorb only a short pause of the shared limiter. A long one is an
+        # MTProto FloodWait - a different account, a different channel - and
+        # waiting it out here would freeze the probe behind a ban that has
+        # nothing to do with the Bot API.
+        if self._limiter.paused_for <= _BOT_API_ABSORB_PAUSE:
+            await self._limiter.acquire()
         lookup = await lookup_chat(self._bot, f"@{name}")
 
         if lookup.found:

@@ -116,6 +116,13 @@ VALUABLE_CONFIRM_BUDGET = 5
 # pacing keeps the request rate identical, only the worst-case wait grows, and
 # the progress screen exists precisely to make that wait bearable.
 SHORT_NAME_LENGTH = 6
+
+# The most authoritative calls one public-led search may spend on confirming
+# trace-free candidates. The user account is the scarcest quota the bot has
+# and every refusal is Telegram's own reserve talking; five attempts answer
+# "is anything here actually claimable" without draining the account into the
+# next FloodWait. A user who gets nothing retries - at five calls a retry.
+PUBLIC_ONLY_CONFIRM_CAP = 5
 SHORT_NAME_CONFIRM_BUDGET = 30
 # Unlimited mode ("free bot"): keep hunting until a name is found. The ceiling
 # still exists, because "unlimited" must not mean "ten minutes of frozen screen":
@@ -810,28 +817,34 @@ class UsernameFinder:
     async def _public_only_search(
         self, criteria: SearchCriteria, progress, state: "_SweepState"
     ) -> FindAttempt:
-        """Answer without any Telegram session at all.
+        """Answer from the public pages - with the session as the final word.
 
-        This is the path that runs when every session is FloodWait-parked or no
-        user session exists. It does exactly what the session path does for
-        screening - the same candidate stream, the same public-page screen, the
-        same taste gates - but the final verdict comes from
-        :mod:`app.telegram.public_verdict` instead of MTProto.
+        This is the path that runs when every session is FloodWait-parked, or
+        when a short search leads with it on purpose. It screens the guarantee
+        stream exactly like the session path does, but the pre-verdict comes
+        from :mod:`app.telegram.public_verdict` instead of MTProto.
 
-        It is deliberately *narrow*: it only ever announces a name the public
-        pages can prove is trace-free on **both** t.me and Fragment, and it says
-        plainly that the verdict came from public sources rather than Telegram.
-        A name it cannot settle is reported as "everything taken" with the best
-        candidate named - never dressed up as free.
+        The verdict layering is the whole point:
 
-        The final verdict is the ``guarantee`` stream (clean coinages), not the
-        real-word stream: real words need the authoritative channel to be judged
-        at all - they are almost all taken, and t.me cannot tell that apart from
-        a name it will not hand over - so on the public path they would burn the
-        screen for nothing. The coinage stream is exactly the space where a free
-        name lives, which is what makes this path both fast and useful.
+        * "no public trace" (t.me + Fragment both silent) proves nobody OWNS
+          the name - it does **not** prove Telegram will assign it. Telegram
+          keeps a reserve of unoccupied-but-unassignable names, and on short
+          lengths most trace-free candidates sit exactly there. When a user
+          session can answer, every trace-free candidate is therefore
+          **confirmed** through ``account.checkUsername`` (paced, budgeted)
+          before delivery, and refused candidates are never handed out;
+        * only when no session can answer at all is the public verdict
+          delivered on its own - labelled ``claimability_unverified``.
+
+        The stream is the ``guarantee`` stream (clean coinages), not the
+        real-word stream: real words need the authoritative channel to be
+        judged at all - they are almost all taken, and t.me cannot tell that
+        apart from a name it will not hand over - so on the public path they
+        would burn the screen for nothing. The coinage stream is exactly the
+        space where a free name lives, which is what makes this path fast.
         """
         screen_cap = UNLIMITED_SCREEN_CAP if runtime.unlimited_search else SCREEN_CAP
+        budget = state.budget or self._confirm_budget(criteria)
         best: str | None = None
         best_premium: Premium | None = None
         screened = 0
@@ -840,7 +853,7 @@ class UsernameFinder:
         state.screened = 0
 
         stream = self._guarantee_candidates(criteria)
-        while screened < screen_cap:
+        while screened < screen_cap and state.confirmations < budget:
             batch: list[str] = []
             for name in stream:
                 batch.append(name)
@@ -864,6 +877,9 @@ class UsernameFinder:
                 premium = premium_rating(letter_part(name))
                 if best_premium is None or premium.total > best_premium.total:
                     best, best_premium = name, premium
+                # Mirror onto the shared state so the miss flows (and the
+                # public fallback) can name the best candidate examined.
+                state.best, state.best_premium = best, best_premium
                 if isinstance(verdict, Exception):
                     # A failed public fetch is not a verdict - it simply did not
                     # settle this name. It is still one name examined.
@@ -877,9 +893,91 @@ class UsernameFinder:
                 # Prefer the best-looking of the free names found in this batch,
                 # so the answer is the nicest one available rather than whichever
                 # happened to be first in the batch.
-                name, verdict = max(
-                    free_hits, key=lambda item: premium_rating(letter_part(item[0])).total
+                ranked = sorted(
+                    free_hits,
+                    key=lambda item: premium_rating(letter_part(item[0])).total,
+                    reverse=True,
                 )
+
+                # "No public trace" proves nobody OWNS the name - not that
+                # Telegram will hand it over. On short lengths most trace-free
+                # names sit in Telegram's own reserve: unoccupied, yet refused
+                # to everybody - and only ``account.checkUsername`` separates
+                # the two. So when a user session can answer at all, every
+                # candidate is confirmed through it first (paced, budgeted) and
+                # only a *confirmed* name is delivered; the public verdict
+                # alone is delivered when no session exists - labelled.
+                if mtproto_client.user_ready:
+                    fallback: tuple[str, PublicVerdict] | None = None
+                    confirms_here = 0
+                    for name, verdict in ranked:
+                        if (
+                            state.confirmations >= budget
+                            or confirms_here >= PUBLIC_ONLY_CONFIRM_CAP
+                        ):
+                            break
+                        confirms_here += 1
+                        state.confirmations += 1
+                        if progress is not None:
+                            with contextlib.suppress(Exception):
+                                progress(
+                                    "public", screened, screen_cap, screened,
+                                    activity="confirming", last_name=name,
+                                    last_result="confirming",
+                                )
+                        basic = await self._checker.confirm_availability(name)
+                        if basic.status is CheckStatus.AVAILABLE and getattr(
+                            basic, "detail", None
+                        ) != "claimability_unverified":
+                            # Telegram itself says: claimable. The real answer.
+                            logger.info(
+                                "public-only search confirmed @%s (checkUsername)",
+                                name,
+                            )
+                            attempt = await self._hit_attempt(
+                                name, basic, state,
+                                fragment_clear=True, fragment_checked=True,
+                            )
+                            attempt.public_confidence = verdict.confidence
+                            attempt.public_reason = verdict.reason
+                            return attempt
+                        if basic.status in (
+                            CheckStatus.AVAILABLE,  # gate silent -> unverified
+                            CheckStatus.RATE_LIMITED, CheckStatus.UNKNOWN,
+                        ):
+                            # The gate cannot answer (silent, throttled or
+                            # unknown). The public verdict stays the best truth
+                            # available - deliver this candidate, labelled.
+                            fallback = (name, verdict)
+                            break
+                        # OCCUPIED / INVALID: Telegram refuses this name (its
+                        # own reserve). Never deliver it - try the next one.
+                        # The refusals are real examinations of real names.
+                        state.occupied_seen += 1
+
+                    if fallback is not None:
+                        name, verdict = fallback
+                        logger.info(
+                            "public-only search found @%s (no public trace, "
+                            "gate unavailable)",
+                            name,
+                        )
+                        basic = CheckResult(
+                            username=name, status=CheckStatus.AVAILABLE,
+                            source="public_verdict", detail="claimability_unverified",
+                        )
+                        attempt = await self._hit_attempt(
+                            name, basic, state, fragment_clear=True, fragment_checked=True
+                        )
+                        attempt.public_confidence = verdict.confidence
+                        attempt.public_reason = verdict.reason
+                        return attempt
+
+                    # Every trace-free candidate in the batch was refused by
+                    # Telegram's reserve - screen the next batch.
+                    continue
+
+                name, verdict = ranked[0]
                 logger.info("public-only search found @%s (no public trace)", name)
                 basic = CheckResult(
                     username=name, status=CheckStatus.AVAILABLE,
@@ -965,6 +1063,13 @@ class UsernameFinder:
         screen_cap = UNLIMITED_SCREEN_CAP if high else SCREEN_CAP
         guarantee_cap = UNLIMITED_GUARANTEE_SCREEN_CAP if high else GUARANTEE_SCREEN_CAP
 
+        # The confirmation budget is shared by every channel that can spend an
+        # authoritative call - including the public-only path, which confirms
+        # its trace-free candidates before delivery. It must be set before any
+        # of those paths can run.
+        budget = self._confirm_budget(criteria)
+        state.budget = budget
+
         # If Telegram has already thrown a long FloodWait at us, a search cannot
         # be carried out *through a session* right now. The search still happens,
         # though - screening and the final verdict both live on public pages that
@@ -998,8 +1103,6 @@ class UsernameFinder:
             )
             return await self._public_only_search(criteria, progress, state)
 
-        budget = self._confirm_budget(criteria)
-        state.budget = budget
         now = asyncio.get_event_loop().time()
         state.deadline = now + (
             MAX_SEARCH_SECONDS if max_seconds is None else max(0.0, max_seconds)
@@ -1037,12 +1140,15 @@ class UsernameFinder:
             attempt = await self._public_only_search(criteria, progress, state)
             if attempt.hit:
                 return attempt
-            # The public pages could not settle anything (network down, source
-            # disabled). The session is the only channel left - spend the whole
-            # budget on the guarantee stream and skip the valuable pass: at
-            # this length it would only fund confirmations of taken names.
+            # A short search keeps the WHOLE hunt inside the same small
+            # authoritative allowance: whatever the public hunt spent, the
+            # sweep may finish - but the scarce account is never drained
+            # further by one search. The attempt already says exactly that.
+            ceiling = min(budget, PUBLIC_ONLY_CONFIRM_CAP)
+            if state.confirmations >= ceiling:
+                return attempt
             stopped = await self._sweep(
-                self._guarantee_candidates(criteria), budget, state, progress,
+                self._guarantee_candidates(criteria), ceiling, state, progress,
                 "guarantee", guarantee_cap,
             )
             if stopped is not None:

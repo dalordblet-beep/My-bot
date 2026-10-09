@@ -269,8 +269,9 @@ async def test_finder_exhausts_its_budget_before_giving_up(bot, monkeypatch):
 
 
 async def test_short_names_get_an_enlarged_budget(bot, monkeypatch):
-    """5-6 letter handles are the most squatted space on Telegram; a base
-    budget would end those searches in "all taken" far too often."""
+    """5-6 letter handles are the most squatted space on Telegram; a search
+    there leads with the public hunt and keeps its authoritative calls inside
+    the small per-search allowance - the scarce user account must survive."""
     from app.search import finder as finder_module
     from app.utils.enums import CheckStatus
     from app.utils.results import CheckResult
@@ -291,7 +292,9 @@ async def test_short_names_get_an_enlarged_budget(bot, monkeypatch):
     attempt = await finder.find_one(SearchCriteria(length=5))
 
     assert attempt.reason == "all_taken"
-    assert confirms == finder_module.SHORT_NAME_CONFIRM_BUDGET
+    # The enlarged short-name budget exists, but one search never spends more
+    # than the public-led allowance on the scarce account.
+    assert confirms == finder_module.PUBLIC_ONLY_CONFIRM_CAP
 
 
 async def test_digits_on_names_always_carry_digits(bot, monkeypatch):
@@ -463,6 +466,88 @@ async def test_a_publicly_reserved_name_never_reaches_mtproto(bot, monkeypatch):
     assert confirms == 0
     assert attempt.hit is False
     assert attempt.reason == "all_taken"
+
+
+async def test_a_trace_free_name_is_confirmed_before_delivery(bot, monkeypatch):
+    """The regression behind "мгновенно находит 5-буквенные, но занятые".
+
+    A name with no public trace is not automatically claimable: Telegram keeps
+    a reserve of unoccupied-but-unassignable names, and on short lengths most
+    trace-free candidates sit exactly there. With a user session able to
+    answer, the public verdict must be confirmed through ``checkUsername``
+    before delivery - and a name Telegram refuses is never handed out.
+    """
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+    from app.telegram.public_verdict import PublicVerdict
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    finder = UsernameFinder(checker, None)
+
+    confirmed: list[str] = []
+
+    async def reserve_then_free(name: str) -> CheckResult:
+        confirmed.append(name)
+        if len(confirmed) <= 2:
+            # Telegram's own reserve: unoccupied, yet refused to everybody.
+            return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+        return CheckResult(
+            username=name, status=CheckStatus.AVAILABLE, source="mtproto",
+            detail="claimability_verified",
+        )
+
+    checker.confirm_availability = reserve_then_free
+
+    async def free_everywhere(self, name: str) -> PublicVerdict:
+        return PublicVerdict("free", "no_public_trace_anywhere")
+
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", free_everywhere
+    )
+
+    attempt = await finder.find_one(SearchCriteria(length=5))
+
+    # Two trace-free names were refused before one was actually handed over.
+    assert attempt.hit is True
+    assert len(confirmed) == 3
+    assert attempt.username == confirmed[-1]
+    assert attempt.basic is not None
+    assert attempt.basic.detail == "claimability_verified"
+
+
+async def test_refused_trace_free_names_are_never_delivered(bot, monkeypatch):
+    """When Telegram refuses every trace-free candidate (its reserve), the
+    search must say so honestly - not hand out a name the user cannot claim."""
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+    from app.telegram.public_verdict import PublicVerdict
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    finder = UsernameFinder(checker, None)
+
+    confirms = 0
+
+    async def refused(name: str) -> CheckResult:
+        nonlocal confirms
+        confirms += 1
+        return CheckResult(username=name, status=CheckStatus.OCCUPIED, source="mtproto")
+
+    checker.confirm_availability = refused
+
+    async def free_everywhere(self, name: str) -> PublicVerdict:
+        return PublicVerdict("free", "no_public_trace_anywhere")
+
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", free_everywhere
+    )
+
+    attempt = await finder.find_one(SearchCriteria(length=5))
+
+    assert attempt.hit is False
+    assert attempt.reason == "all_taken"
+    assert confirms >= 1
 
 
 async def test_free_result_requires_mtproto_not_just_the_page(bot, monkeypatch):
