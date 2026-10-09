@@ -56,6 +56,11 @@ _INTERVAL_CAP = 20.0
 # availability call, so its pace is the bot's real throughput knob - but it is
 # still an account-level limit, so it can never be removed entirely.
 _USER_INTERVAL_FLOOR = 0.2
+# The user pool backs off the same way the bot pool does (x2 per flood), but
+# with a higher ceiling: a user account is the scarcest quota the bot has and
+# carries the whole claimability gate, so caution is worth more than speed.
+# With the 3s base the worst-case pace is one call every 12 seconds.
+_USER_PACE_MULTIPLIER_CAP = 4.0
 
 # How many pending join requests to read in one page when checking whether a
 # specific user is in the queue. The queue of a channel that approves by hand is
@@ -201,6 +206,12 @@ class MtprotoClient:
         # limited within minutes of a busy short-name search. The pace is
         # shared across the user-session pool.
         self._user_limiter = RateLimiter(min_interval=settings.request_delay)
+        # Adaptive pacing for the user pool, mirroring the bot pool: every
+        # FloodWait backs the pace off, a flood-free stretch recovers it.
+        # Without this a parked session woke straight back into the same load
+        # that flooded it - the pattern that once parked an account for hours.
+        self._user_pace_multiplier = 1.0
+        self._user_last_flood_at = 0.0
         # fragment.* lookups (collectible verdicts, appraise) are MTProto calls
         # too. They used to run unpaced on the MAIN session - hammering an
         # already-flood-limited account and extending its cooldown.
@@ -310,6 +321,53 @@ class MtprotoClient:
     @property
     def user_session_count(self) -> int:
         return sum(1 for entry in self._user_clients if entry["ready"])
+
+    @property
+    def user_call_interval(self) -> float:
+        """Base seconds between user-account calls, before the pool divides it.
+
+        ``user_call_delay`` is the safe rate for ``account.checkUsername``; on
+        top of it the pace is adaptive, exactly like the bot pool's: every
+        FloodWait doubles it (capped), ten flood-free minutes restore it.
+        Telegram only ever complains through FloodWaits, so this feedback loop
+        is what keeps a user session from being re-flooded the moment its
+        parking expires - the account stays under the rate instead of
+        oscillating between "too fast" and "banned".
+        """
+        now = asyncio.get_event_loop().time()
+        if (
+            self._user_pace_multiplier > 1.0
+            and now - self._user_last_flood_at > _PACE_DECAY_SECONDS
+        ):
+            self._user_pace_multiplier = 1.0
+            logger.info(
+                "user pool pace recovered after %.0f flood-free seconds",
+                _PACE_DECAY_SECONDS,
+            )
+        return settings.user_call_delay * self._user_pace_multiplier
+
+    def _register_user_flood(self, entry: dict[str, Any], wait: float, what: str) -> None:
+        """One user account got FloodWaited - park it and back the pool off.
+
+        The flooded session sits out its wait; the multiplier makes the shared
+        *pace* slower too, so the surviving sessions do not pour the same load
+        down the wire and end up parked as well. The bot pool runs the same
+        loop (see ``_register_flood``) - this is its user-side twin.
+        """
+        now = asyncio.get_event_loop().time()
+        if now - self._user_last_flood_at > _PACE_DECAY_SECONDS:
+            self._user_pace_multiplier = 2.0  # a fresh flood starts a new backoff
+        else:
+            self._user_pace_multiplier = min(
+                self._user_pace_multiplier * 2.0, _USER_PACE_MULTIPLIER_CAP
+            )
+        self._user_last_flood_at = now
+        entry["cooldown_until"] = max(entry["cooldown_until"], now + wait)
+        logger.warning(
+            "user pool pace backed off: x%.1f (interval %.2fs) - %s: %s parked %.0fs",
+            self._user_pace_multiplier, self.user_call_interval, what,
+            entry["name"], wait,
+        )
 
     async def start(self) -> bool:
         if not self.configured:
@@ -629,10 +687,11 @@ class MtprotoClient:
         if not ready:
             return MtprotoResult("unknown", "no_user_session")
 
-        # The safe per-account rate divided by the number of live sessions:
-        # one session carries the whole pace, N sessions share it.
+        # The safe per-account rate (adaptive, see ``user_call_interval``)
+        # divided by the number of live sessions: one session carries the
+        # whole pace, N sessions share it.
         self._user_limiter.min_interval = max(
-            _USER_INTERVAL_FLOOR, settings.user_call_delay / len(ready)
+            _USER_INTERVAL_FLOOR, self.user_call_interval / len(ready)
         )
 
         now = asyncio.get_event_loop().time()
@@ -658,11 +717,9 @@ class MtprotoClient:
                     entry["ready"] = False
                     continue
                 except FloodWaitError as exc:  # pragma: no cover - network dependent
-                    wait = float(getattr(exc, "seconds", 60) or 60)
-                    entry["cooldown_until"] = now + wait
-                    logger.warning(
-                        "checkUsername session %s flood wait %ss - parked",
-                        entry["name"], int(wait),
+                    self._register_user_flood(
+                        entry, float(getattr(exc, "seconds", 60) or 60),
+                        what="checkUsername",
                     )
                     continue
                 except Exception as exc:
@@ -720,9 +777,9 @@ class MtprotoClient:
         if not ready:
             return None
 
-        # The user-only calls share one safe pace across the pool.
+        # The user-only calls share one safe, adaptive pace across the pool.
         self._user_limiter.min_interval = max(
-            _USER_INTERVAL_FLOOR, settings.user_call_delay / len(ready)
+            _USER_INTERVAL_FLOOR, self.user_call_interval / len(ready)
         )
 
         now = asyncio.get_event_loop().time()
@@ -746,21 +803,17 @@ class MtprotoClient:
                         )
                     )
                 except FloodWaitError as exc:  # pragma: no cover - network dependent
-                    wait = float(getattr(exc, "seconds", 60) or 60)
-                    entry["cooldown_until"] = now + wait
-                    logger.warning(
-                        "join request lookup: session %s flood wait %ss - parked",
-                        entry["name"], int(wait),
+                    self._register_user_flood(
+                        entry, float(getattr(exc, "seconds", 60) or 60),
+                        what="join request lookup",
                     )
                     continue
                 except Exception as exc:
                     cls = type(exc).__name__
                     if "FloodWait" in cls:
-                        wait = float(getattr(exc, "seconds", 60) or 60)
-                        entry["cooldown_until"] = now + wait
-                        logger.warning(
-                            "join request lookup: session %s flood wait %ss - parked",
-                            entry["name"], int(wait),
+                        self._register_user_flood(
+                            entry, float(getattr(exc, "seconds", 60) or 60),
+                            what="join request lookup",
                         )
                         continue
                     # Not an administrator, wrong chat id, chat has no request

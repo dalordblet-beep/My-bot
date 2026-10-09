@@ -500,6 +500,33 @@ class UsernameFinder:
                 else:
                     yield candidate
 
+    async def _public_gate(self, name: str) -> str | None:
+        """The free pre-confirmation filter: what the public pages say first.
+
+        ``account.checkUsername`` is the scarcest call the bot can make - it
+        runs on a real user account with a hard rate limit. The two public
+        pages (t.me card, Fragment page) cost nothing and can still kill a
+        candidate outright: a reserved or listed name often carries **no**
+        t.me card, so it survives the cheap screen and used to reach the
+        authoritative call just to be told "taken". Asking the public pages
+        first means the user session is only ever touched for names they
+        cannot fault - exactly the handful worth one authoritative call.
+
+        Returns ``"occupied"`` / ``"reserved"`` when the public pages killed
+        the candidate, ``None`` when they could not settle it (or are
+        unavailable) and the authoritative check should run.
+        """
+        try:
+            verdict: PublicVerdict = await public_verdict_client.judge(name)
+        except Exception as exc:
+            logger.debug("public gate failed for %s: %s", name, exc)
+            return None
+        if verdict.status == "occupied":
+            return "occupied"
+        if verdict.status == "reserved":
+            return "reserved"
+        return None
+
     async def _sweep(
         self, candidates: Iterator[str], budget: int, state: _SweepState,
         progress=None, phase: str = "valuable", screen_cap: int = SCREEN_CAP,
@@ -570,6 +597,23 @@ class UsernameFinder:
                     break
 
                 name = survivors[index]
+
+                # The free filter before the scarce call: whatever the public
+                # pages can settle costs no quota at all (see ``_public_gate``).
+                # Only a name they cannot fault reaches ``checkUsername``.
+                killed = await self._public_gate(name)
+                if killed is not None:
+                    state.occupied_seen += 1
+                    index += 1
+                    if progress is not None:
+                        with contextlib.suppress(Exception):
+                            progress(
+                                phase, state.confirmations, budget, state.screened,
+                                activity="screening",
+                                last_name=name, last_result=killed,
+                            )
+                    continue
+
                 basic = await self._checker.confirm_availability(name)
 
                 if basic.status is CheckStatus.RATE_LIMITED:
@@ -1200,6 +1244,14 @@ class UsernameFinder:
                 if len(free) >= VARIANTS_CAP or confirmations >= VARIANT_CONFIRM_BUDGET:
                     break
                 name = survivors[index]
+
+                # The same free filter as the search sweep: the public pages
+                # kill what they can before the user account is asked.
+                killed = await self._public_gate(name)
+                if killed is not None:
+                    index += 1
+                    continue
+
                 basic = await self._checker.confirm_availability(name)
                 if basic.status is CheckStatus.RATE_LIMITED:
                     # Telegram is throttling the pool. A sessionless confirm

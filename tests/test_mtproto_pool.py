@@ -378,6 +378,47 @@ async def test_the_user_pool_scales_the_verdict_pace(monkeypatch):
     assert client._user_limiter.min_interval == pytest.approx(3.0 / 4)
 
 
+async def test_a_user_pool_flood_backs_the_pace_off_and_it_recovers(monkeypatch):
+    """The user account is the scarcest quota the bot has, and Telegram only
+    ever complains through FloodWaits. So a flood must do two things: park the
+    session AND slow the shared pace down - otherwise the session wakes
+    straight back into the load that flooded it (the hours-long parking
+    pattern). Ten flood-free minutes then restore the base speed.
+    """
+    from telethon.errors import FloodWaitError
+
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(settings, "user_session_delay", 3.0)
+
+    error = FloodWaitError(request=None)
+    error.seconds = 90
+    monkeypatch.setattr(
+        client, "_user_clients",
+        [_session("u", FakeClient(lambda r: error))], raising=False,
+    )
+    client._user_pace_multiplier = 1.0
+
+    verdict = await client.claim_verdict("whatever")
+    assert verdict.kind == "flood"
+    # The session is parked...
+    assert client._user_clients[0]["cooldown_until"] > 0
+    # ...and the pace learned: the 3s base doubled.
+    assert client._user_pace_multiplier == pytest.approx(2.0)
+
+    # The next call runs at the backed-off pace, and the next flood doubles
+    # again - up to the cap, which keeps a cautious pace from reading as a
+    # frozen screen.
+    client._user_clients[0]["cooldown_until"] = 0.0
+    await client.claim_verdict("whatever")
+    assert client._user_limiter.min_interval == pytest.approx(6.0)
+    assert client._user_pace_multiplier == pytest.approx(4.0)
+
+    # Ten flood-free minutes recover the full speed.
+    client._user_last_flood_at = asyncio.get_event_loop().time() - 601
+    assert client.user_call_interval == pytest.approx(3.0)
+    assert client._user_pace_multiplier == 1.0
+
+
 async def test_occupied_and_for_sale_are_told_apart(monkeypatch):
     """The three outcomes checkUsername documents, mapped without guessing.
 

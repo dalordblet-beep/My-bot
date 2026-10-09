@@ -425,6 +425,46 @@ async def test_finder_reports_unconfirmed_when_nothing_can_be_verified(bot):
     assert attempt.reason == "unconfirmed"
 
 
+async def test_a_publicly_reserved_name_never_reaches_mtproto(bot, monkeypatch):
+    """The scarce authoritative call is spent only on names the free public
+    pages cannot fault. Reserved names (a Fragment page, no t.me card) survive
+    the cheap screen - and used to burn a real confirmation each just to hear
+    "taken". The public gate now kills them without spending any quota.
+    """
+    from app.utils.enums import CheckStatus
+    from app.utils.results import CheckResult
+    from app.telegram.public_verdict import PublicVerdict
+
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+    checker = UsernameChecker(cache=None, bot=bot, page_probe=FakePageProbe(state="unknown"))
+    finder = UsernameFinder(checker, None)
+
+    confirms = 0
+
+    async def counting_confirm(name: str) -> CheckResult:
+        nonlocal confirms
+        confirms += 1
+        return CheckResult(username=name, status=CheckStatus.AVAILABLE, source="mtproto")
+
+    checker.confirm_availability = counting_confirm
+
+    # The public pages know what the cheap t.me screen does not: every
+    # candidate is actually listed on Fragment.
+    async def reserved_everywhere(self, name: str) -> PublicVerdict:
+        return PublicVerdict("reserved", "fragment_has_page")
+
+    monkeypatch.setattr(
+        "app.telegram.public_verdict.PublicVerdictClient.judge", reserved_everywhere
+    )
+
+    attempt = await finder.find_one(SearchCriteria(length=8))
+
+    # Nothing reached the authoritative channel, and the run says taken.
+    assert confirms == 0
+    assert attempt.hit is False
+    assert attempt.reason == "all_taken"
+
+
 async def test_free_result_requires_mtproto_not_just_the_page(bot, monkeypatch):
     """The core promise: the page alone may never declare a name free.
 

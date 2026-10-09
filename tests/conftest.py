@@ -250,6 +250,8 @@ async def clean_state(database, mock_session, captcha_service, dispatcher, page_
         {"name": "t", "client": None, "ready": True, "cooldown_until": 0.0}
     ]
     mtproto_client._user_turn = 0
+    mtproto_client._user_pace_multiplier = 1.0
+    mtproto_client._user_last_flood_at = 0.0
     yield
 
 
