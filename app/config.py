@@ -44,7 +44,11 @@ class Settings(BaseSettings):
     # the user-only ``account.checkUsername``. That method is the single source
     # that can tell a genuinely claimable name from one Telegram answers
     # ``not_occupied`` for but then refuses to assign (reserved / cooldown /
-    # anti-abuse) - the false "free" that a bot session cannot avoid. Leave the
+    # anti-abuse) - the false "free" that a bot session cannot avoid. Nor can
+    # any other bot-side call: ``channels.checkUsername`` and
+    # ``channels.updateUsername`` answer ``BotMethodInvalidError`` to a bot
+    # session even when the bot administers the channel (probed live), so a
+    # user account is the only claimability oracle Telegram exposes. Leave the
     # file absent to disable; create it with ``scripts/login_mtproto.py --user``.
     mtproto_user_session: str = "username_scanner_user"
     # Optional POOL of extra user sessions (comma separated base names). One

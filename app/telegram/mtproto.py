@@ -679,9 +679,13 @@ class MtprotoClient:
         the call that got flooded.
 
         Only a *user* account may call this at all ("Only users can use this
-        method"), which is why the bot pool cannot help here. Sessions are tried
-        in rotation and a rate-limited one is parked, so one busy account does
-        not stall the others.
+        method"), which is why the bot pool cannot help here. The channel-side
+        alternatives are bot-restricted too - ``channels.checkUsername`` and
+        ``channels.updateUsername`` both answer ``BotMethodInvalidError`` to a
+        bot session even as the channel's admin (probed live) - so this user
+        pool is the only claimability oracle the bot will ever have. Sessions
+        are tried in rotation and a rate-limited one is parked, so one busy
+        account does not stall the others.
         """
         ready = [e for e in self._user_clients if e["ready"]]
         if not ready:
