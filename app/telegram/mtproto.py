@@ -120,7 +120,10 @@ try:  # Telethon is a hard requirement, but import errors must not crash boot.
     from telethon.tl.functions.account import CheckUsernameRequest
     from telethon.tl.functions.contacts import ResolveUsernameRequest
     from telethon.tl.functions.fragment import GetCollectibleInfoRequest
-    from telethon.tl.functions.messages import GetChatInviteImportersRequest
+    from telethon.tl.functions.messages import (
+        CheckChatInviteRequest,
+        GetChatInviteImportersRequest,
+    )
     from telethon.tl.types import Channel, Chat, InputCollectibleUsername, InputUserEmpty
     from telethon.tl.types import User as TgUser
 
@@ -833,6 +836,49 @@ class MtprotoClient:
                     if getattr(importer, "user_id", None) == user_id:
                         return True
                 return False
+        return None
+
+    async def resolve_invite(self, invite_hash: str) -> int | None:
+        """Turn a private ``t.me/+<hash>`` invite into a chat id, or ``None``.
+
+        The Bot API ``getChat`` cannot resolve invite links at all, which is
+        why an admin adding a private channel by link ended up with a row that
+        had no id - and the gate silently skipped it. MTProto can:
+        ``messages.checkChatInvite`` answers ``ChatInviteAlready`` (with the
+        chat) when the calling account is a member - and the bot must be a
+        member (usually an admin) of every required channel anyway.
+
+        Returns the Bot-API-style id (``-100`` prefix for channels/supergroups).
+        """
+        hash_part = (invite_hash or "").strip().lstrip("+")
+        if not hash_part:
+            return None
+        now = asyncio.get_event_loop().time()
+        for entry in self._bot_clients:
+            if not entry["ready"] or entry["cooldown_until"] > now:
+                continue
+            try:
+                result = await entry["client"](
+                    CheckChatInviteRequest(hash=hash_part)
+                )
+            except FloodWaitError as exc:  # pragma: no cover - network dependent
+                entry["cooldown_until"] = now + float(getattr(exc, "seconds", 60) or 60)
+                continue
+            except Exception as exc:
+                logger.debug(
+                    "checkChatInvite(%s) via %s failed: %s",
+                    hash_part, entry["name"], exc,
+                )
+                continue
+            chat = getattr(result, "chat", None)
+            chat_id = getattr(chat, "id", 0)
+            if chat_id:
+                # Telethon returns the raw id; the Bot API marks
+                # channels/supergroups with a -100 prefix.
+                if isinstance(chat, Channel):
+                    return -1000000000000 - chat_id
+                return -chat_id
+            return None
         return None
 
     def _park(self, name: str, wait: float) -> None:

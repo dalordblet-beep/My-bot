@@ -47,9 +47,11 @@ from app.services.subscriptions import (
     legacy_subs,
     list_managed_subs,
     remove_subscription,
+    save_managed_subs,
     serialize_subs,
 )
 from app.telegram.bot_api import lookup_chat
+from app.telegram.mtproto import mtproto_client
 from app.utils.enums import Permission, Privilege
 from app.utils.logging_setup import get_logger
 
@@ -593,14 +595,48 @@ async def on_subscription_target(
         )
         return
 
-    # Private invite we could not resolve: still usable as a join button.
+    # Private invite we could not resolve through the Bot API. The Bot API
+    # cannot resolve invite links *at all* - but MTProto can, because the bot
+    # is a member of its own required channels. Resolving the id here is what
+    # makes the subscription actually work: a row with only an invite_url has
+    # no chat_id, and the gate silently skips rows without one.
     if invite_url:
-        sub = RequiredSub(key=invite_url.split("/")[-1] or "invite", invite_url=invite_url, label=invite_url)
-        await add_subscription(session, sub)
-        await message.answer(
-            t(lang, "admin.subs_added", title=invite_url),
-            reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+        invite_hash = invite_url.split("/")[-1]
+        chat_id = await mtproto_client.resolve_invite(invite_hash)
+        title = invite_url
+        if chat_id:
+            resolved_by_id = await lookup_chat(bot, chat_id)
+            if resolved_by_id.found and resolved_by_id.title:
+                title = resolved_by_id.title
+
+        # Re-adding the same invite replaces the stored row instead of failing
+        # as a duplicate - that is how an earlier id-less entry gets healed.
+        kept = [s for s in list_managed_subs() if s.invite_url != invite_url]
+        sub = RequiredSub(
+            key=invite_hash or "invite",
+            chat_id=chat_id or 0,
+            invite_url=invite_url,
+            label=title,
         )
+        if any(s.key == sub.key for s in kept):
+            sub = RequiredSub(
+                key=f"{sub.key}2", chat_id=sub.chat_id,
+                invite_url=sub.invite_url, label=sub.label,
+            )
+        await save_managed_subs(session, kept + [sub])
+        if chat_id:
+            await message.answer(
+                t(lang, "admin.subs_added", title=title),
+                reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+            )
+        else:
+            # No id means the gate cannot check membership: say so instead of
+            # letting the admin believe a broken entry is doing its job.
+            await message.answer(
+                f"{t(lang, 'admin.subs_added', title=title)}\n\n"
+                f"{t(lang, 'admin.subs_no_id_hint')}",
+                reply_markup=admin_back_keyboard(lang, cb.ADMIN_ACCESS),
+            )
         return
 
     await message.answer(

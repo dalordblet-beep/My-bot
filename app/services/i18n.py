@@ -321,6 +321,11 @@ EN: dict[str, str] = {
     ),
     "admin.subs_added": "Added: {title}",
     "admin.subs_failed": "Could not resolve that channel. Check the link/id and try again.",
+    "admin.subs_no_id_hint": (
+        "{warn} The channel was saved, but its id could not be resolved, so the "
+        "gate cannot check membership for it. Make sure the bot is a member of "
+        "the channel, then remove and re-add it."
+    ),
     "admin.subs_duplicate": "{title} is already in the list.",
     "admin.subs_removed": "Removed: {title}",
     "admin.subs_invalid": "Send a channel @username, link or id (one line).",
@@ -1251,6 +1256,11 @@ RU: dict[str, str] = {
     ),
     "admin.subs_added": "Добавлено: {title}",
     "admin.subs_failed": "Не удалось определить канал. Проверьте ссылку/id и попробуйте снова.",
+    "admin.subs_no_id_hint": (
+        "{warn} Канал сохранён, но его id определить не удалось — гейт не сможет "
+        "проверять подписку. Убедись, что бот состоит в канале, затем удали и "
+        "добавь его заново."
+    ),
     "admin.subs_duplicate": "{title} уже в списке.",
     "admin.subs_removed": "Убрано: {title}",
     "admin.subs_invalid": "Отправьте @username, ссылку или id канала (в одну строку).",

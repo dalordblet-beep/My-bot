@@ -365,3 +365,33 @@ def test_colour_roles_are_the_only_styles_used():
                         f"{lang}:{name} -> {button.text!r} uses {button.style!r}, "
                         f"which is not a design-token style"
                     )
+
+
+def test_subscriptions_have_one_check_button():
+    """Join buttons point at the channels; ONE "Verify" re-checks everything.
+
+    The old layout had an "I subscribed" button per channel - several
+    near-identical buttons saying the same thing. The click was never trusted
+    anyway, so a single check button does the whole job.
+    """
+    from app.bot.keyboards import callbacks as cb
+    from app.bot.keyboards.subscription_kb import subscriptions_keyboard
+    from app.services.subscriptions import RequiredSub
+
+    markup = subscriptions_keyboard(
+        "en",
+        [
+            (RequiredSub(key="a", chat_id=-1, invite_url="https://t.me/+a"), False, "https://t.me/+a"),
+            (RequiredSub(key="b", chat_id=-2, invite_url="https://t.me/+b"), False, "https://t.me/+b"),
+        ],
+    )
+    rows = markup.inline_keyboard
+    # One row per channel, then exactly one check row.
+    assert len(rows) == 3
+    check_row = rows[-1]
+    assert len(check_row) == 1
+    assert check_row[0].callback_data == cb.SUB_CHECK_ALL
+    assert all(row[0].url for row in rows[:-1]), "join rows must be url buttons"
+    # No per-sub "I subscribed" buttons anywhere.
+    callbacks = [b.callback_data for row in rows for b in row if b.callback_data]
+    assert callbacks == [cb.SUB_CHECK_ALL]

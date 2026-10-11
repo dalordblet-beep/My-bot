@@ -27,6 +27,7 @@ CAPTCHA_RETRY = "captcha:retry"
 SUB_CHECK_PREFIX = "sub:check"
 SUB_CHECK_CHANNEL = "sub:check:channel"
 SUB_CHECK_CHAT = "sub:check:chat"
+SUB_CHECK_ALL = "sub:check:all"
 SUB_JOIN_CHANNEL = "sub:join:channel"
 SUB_JOIN_CHAT = "sub:join:chat"
 

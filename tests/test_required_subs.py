@@ -135,3 +135,29 @@ async def test_check_subs_uses_cache_when_keys_unchanged() -> None:
     user = _UserStub(7)
     results = await guard._check_subs(_FakeSession(), _NoCallBot(), user, [sub_a])
     assert results == {"a": True}
+
+
+async def test_add_replaces_an_id_less_invite_row(fake_store, monkeypatch):
+    """Re-adding the same invite link heals the old row instead of failing.
+
+    The old flow stored a private invite with no chat_id (the Bot API cannot
+    resolve invite links), and the gate silently skipped any row without an
+    id. Re-adding after the resolver exists must replace that entry.
+    """
+    from app.services.subscriptions import save_managed_subs
+
+    broken = RequiredSub(key="ok_ajtGSJkxkNTIy", invite_url="https://t.me/+ok_ajtGSJkxkNTIy", label="old")
+    await save_managed_subs(None, [broken])
+    assert list_managed_subs()[0].configured is False
+
+    healed = RequiredSub(
+        key="ok_ajtGSJkxkNTIy", chat_id=-1004356039881,
+        invite_url="https://t.me/+ok_ajtGSJkxkNTIy", label="New",
+    )
+    kept = [s for s in list_managed_subs() if s.invite_url != healed.invite_url]
+    await save_managed_subs(None, kept + [healed])
+
+    subs = list_managed_subs()
+    assert len(subs) == 1
+    assert subs[0].configured is True
+    assert subs[0].chat_id == -1004356039881
