@@ -23,6 +23,7 @@ from app.collectible.checker import CollectibleChecker
 from app.config import settings
 from app.database.database import dispose_db, init_db, session_scope
 from app.services.captcha import CaptchaService
+from app.services.db_backup import db_backup
 from app.services.name_stock import NameStock
 from app.services.runtime_config import runtime
 from app.services.search_queue import SearchQueue
@@ -127,6 +128,19 @@ async def run() -> None:
         # the only way to tell a claimable name from one Telegram refuses to
         # assign. Absent, the engine stays best-effort.
         await mtproto_client.start_user()
+
+    # The hosting starts the bot in a NEW folder on every deploy, so an
+    # in-project SQLite file dies with the old one. Before anything else, a
+    # fresh (userless) database is refilled from the newest snapshot in the
+    # user session's Saved Messages - users, admin settings, everything.
+    if await db_backup_service.restore_if_fresh():
+        async with session_scope() as session:
+            await runtime.load(session)
+        from app.bot.keyboards.base import apply_button_theme
+        from app.services.i18n import refresh_custom_labels
+
+        apply_button_theme(runtime.button_theme)
+        refresh_custom_labels()
     else:
         logger.warning("MTProto is not configured - basic availability checks are limited")
 
@@ -175,6 +189,11 @@ async def run() -> None:
     daily_drop.start()
     logger.info("daily drop running=%s", daily_drop.running)
 
+    # Snapshots of the database into Saved Messages - the only storage that
+    # survives the hosting's fresh-folder deploys.
+    db_backup.start()
+    logger.info("db backup running=%s", db_backup.running)
+
     logger.info("bot is up, polling")
     try:
         try:
@@ -196,6 +215,7 @@ async def run() -> None:
         await name_stock.stop()
         await daily_drop.stop()
         await watcher.stop()
+        await db_backup.stop()
         lock.release()
         await checker.close()
         await mtproto_client.stop()

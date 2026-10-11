@@ -308,6 +308,18 @@ class MtprotoClient:
         """True when at least one real user session is loaded."""
         return any(entry["ready"] for entry in self._user_clients)
 
+    def first_user_client(self):
+        """A ready user-session Telethon client, or None.
+
+        For rare, latency-insensitive jobs (the database snapshot upload) that
+        sit outside the paced request path and therefore have no dedicated
+        wrapper.
+        """
+        for entry in self._user_clients:
+            if entry["ready"] and entry["cooldown_until"] <= asyncio.get_event_loop().time():
+                return entry["client"]
+        return None
+
     @property
     def user_gate_ready(self) -> bool:
         """True when a user session can answer checkUsername *right now*.

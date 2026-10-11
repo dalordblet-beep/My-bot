@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     # Lower it to squeeze more out of one account; the session parks itself on a
     # FloodWait, so going too far degrades instead of breaking.
     user_session_delay: float = 0.0
+    # Seconds between database snapshots uploaded to the user session's Saved
+    # Messages (0 disables). The hosting starts the bot in a NEW folder on
+    # every deploy, so an in-project SQLite file dies with the old one; this
+    # is what makes users and admin settings survive a redeploy.
+    db_backup_interval: int = 21600
     # How long a single search may spend *waiting out* Telegram throttling
     # before it gives up and says so. A throttle is waited out rather than
     # reported, because "Telegram is limiting us" is not a result - but a search
