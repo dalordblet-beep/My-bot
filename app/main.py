@@ -23,7 +23,7 @@ from app.collectible.checker import CollectibleChecker
 from app.config import settings
 from app.database.database import dispose_db, init_db, session_scope
 from app.services.captcha import CaptchaService
-from app.services.db_backup import db_backup
+from app.services.db_backup import db_backup, restore_if_fresh
 from app.services.name_stock import NameStock
 from app.services.runtime_config import runtime
 from app.services.search_queue import SearchQueue
@@ -129,18 +129,33 @@ async def run() -> None:
         # assign. Absent, the engine stays best-effort.
         await mtproto_client.start_user()
 
-    # The hosting starts the bot in a NEW folder on every deploy, so an
-    # in-project SQLite file dies with the old one. Before anything else, a
-    # fresh (userless) database is refilled from the newest snapshot in the
-    # user session's Saved Messages - users, admin settings, everything.
-    if await db_backup_service.restore_if_fresh():
-        async with session_scope() as session:
-            await runtime.load(session)
-        from app.bot.keyboards.base import apply_button_theme
-        from app.services.i18n import refresh_custom_labels
+        # The hosting starts the bot in a NEW folder on every deploy, so an
+        # in-project SQLite file dies with the old one. A fresh (userless)
+        # database is refilled from the newest snapshot in the user session's
+        # Saved Messages - users, admin settings, everything. It is bounded by
+        # a timeout and can never abort the boot: Telethon sleeps FloodWaits
+        # internally while scanning the chat, and a bot that does not start is
+        # worse than a bot that starts with a fresh database.
+        try:
+            restored = await asyncio.wait_for(restore_if_fresh(), timeout=90)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "db restore: timed out after 90s (session busy?) - starting with "
+                "the local database"
+            )
+            restored = False
+        except Exception as exc:  # a restore must never keep the bot down
+            logger.warning("db restore: unexpected failure - starting anyway: %s", exc)
+            restored = False
 
-        apply_button_theme(runtime.button_theme)
-        refresh_custom_labels()
+        if restored:
+            async with session_scope() as session:
+                await runtime.load(session)
+            from app.bot.keyboards.base import apply_button_theme
+            from app.services.i18n import refresh_custom_labels
+
+            apply_button_theme(runtime.button_theme)
+            refresh_custom_labels()
     else:
         logger.warning("MTProto is not configured - basic availability checks are limited")
 

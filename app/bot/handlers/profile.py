@@ -65,7 +65,7 @@ async def cb_achievements(
     callback: CallbackQuery, session: AsyncSession, user: User, bot: Bot, lang: str = "en"
 ) -> None:
     """Recomputed on demand - it is a handful of cheap count queries."""
-    stats = await _achievement_stats(session, user)
+    stats = await _achievement_stats(session, user, lang)
     await callback.answer()
     if callback.message is not None:
         await show_screen(
@@ -74,7 +74,7 @@ async def cb_achievements(
         )
 
 
-async def _achievement_stats(session: AsyncSession, user: User) -> dict:
+async def _achievement_stats(session: AsyncSession, user: User, lang: str = "en") -> dict:
     stats_row = await user_service.get_settings_row(session, user)
     ach_stats = AchievementStats(
         checks=user.search_count or 0,

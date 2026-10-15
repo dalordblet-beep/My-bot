@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.services.i18n import t
 from app.services.runtime_config import runtime
 
