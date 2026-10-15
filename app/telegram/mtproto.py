@@ -55,7 +55,12 @@ _INTERVAL_CAP = 20.0
 # Hard floor between user-session calls. checkUsername is now the main
 # availability call, so its pace is the bot's real throughput knob - but it is
 # still an account-level limit, so it can never be removed entirely.
+# _USER_INTERVAL_FLOOR is the floor for one call; _USER_POOL_WAITERS is how
+# many callers may wait for the user pool at once. Beyond that the pool is
+# saturated and the honest answer is "busy" NOW - piling hundreds of searches
+# behind one account produced 3.5-minute waits per check and a log flood.
 _USER_INTERVAL_FLOOR = 0.2
+_USER_POOL_WAITERS = 3
 # The user pool backs off the same way the bot pool does (x2 per flood), but
 # with a higher ceiling: a user account is the scarcest quota the bot has and
 # carries the whole claimability gate, so caution is worth more than speed.
@@ -209,6 +214,9 @@ class MtprotoClient:
         # limited within minutes of a busy short-name search. The pace is
         # shared across the user-session pool.
         self._user_limiter = RateLimiter(min_interval=settings.request_delay)
+        # Bounded entry to the user pool: the pool is one serial account, and
+        # an unbounded queue turned a busy period into multi-minute waits.
+        self._user_gate = asyncio.Semaphore(_USER_POOL_WAITERS)
         # Adaptive pacing for the user pool, mirroring the bot pool: every
         # FloodWait backs the pace off, a flood-free stretch recovers it.
         # Without this a parked session woke straight back into the same load
@@ -717,35 +725,44 @@ class MtprotoClient:
         order = ready[self._user_turn % len(ready):] + ready[: self._user_turn % len(ready)]
         self._user_turn += 1
 
-        for entry in order:
-            if entry["cooldown_until"] > now:
-                continue
-            async with self._lock:
-                await self._user_limiter.acquire()
-                try:
-                    available = bool(await entry["client"](CheckUsernameRequest(username)))
-                    return MtprotoResult("free" if available else "occupied")
-                except UsernameOccupiedError:
-                    return MtprotoResult("occupied", "occupied_error")
-                except UsernamePurchaseAvailableError:
-                    return MtprotoResult("fragment", "purchase_available")
-                except UsernameInvalidError:
-                    return MtprotoResult("invalid")
-                except BotMethodInvalidError:
-                    logger.warning("session %s is a bot - dropping it", entry["name"])
-                    entry["ready"] = False
+        # One user account is a serial queue. Without a bound, every running
+        # search piles onto it and each check waits N calls x the paced
+        # interval - measured live at 210 seconds, with the pace backed off on
+        # top. A caller that cannot be served right now must hear it at once
+        # and fall back to the public path, not join the queue.
+        if self._user_gate.locked():
+            return MtprotoResult("flood", "pool_busy")
+
+        async with self._user_gate:
+            for entry in order:
+                if entry["cooldown_until"] > now:
                     continue
-                except FloodWaitError as exc:  # pragma: no cover - network dependent
-                    self._register_user_flood(
-                        entry, float(getattr(exc, "seconds", 60) or 60),
-                        what="checkUsername",
-                    )
-                    continue
-                except Exception as exc:
-                    logger.debug(
-                        "checkUsername(%s) via %s failed: %s", username, entry["name"], exc
-                    )
-                    continue
+                async with self._lock:
+                    await self._user_limiter.acquire()
+                    try:
+                        available = bool(await entry["client"](CheckUsernameRequest(username)))
+                        return MtprotoResult("free" if available else "occupied")
+                    except UsernameOccupiedError:
+                        return MtprotoResult("occupied", "occupied_error")
+                    except UsernamePurchaseAvailableError:
+                        return MtprotoResult("fragment", "purchase_available")
+                    except UsernameInvalidError:
+                        return MtprotoResult("invalid")
+                    except BotMethodInvalidError:
+                        logger.warning("session %s is a bot - dropping it", entry["name"])
+                        entry["ready"] = False
+                        continue
+                    except FloodWaitError as exc:  # pragma: no cover - network dependent
+                        self._register_user_flood(
+                            entry, float(getattr(exc, "seconds", 60) or 60),
+                            what="checkUsername",
+                        )
+                        continue
+                    except Exception as exc:
+                        logger.debug(
+                            "checkUsername(%s) via %s failed: %s", username, entry["name"], exc
+                        )
+                        continue
 
         wait = min(
             (
@@ -805,50 +822,57 @@ class MtprotoClient:
         order = ready[self._user_turn % len(ready):] + ready[: self._user_turn % len(ready)]
         self._user_turn += 1
 
-        for entry in order:
-            if entry["cooldown_until"] > now:
-                continue
-            async with self._lock:
-                await self._user_limiter.acquire()
-                try:
-                    peer = await entry["client"].get_input_entity(chat_id)
-                    result = await entry["client"](
-                        GetChatInviteImportersRequest(
-                            peer=peer,
-                            offset_date=None,
-                            offset_user=InputUserEmpty(),
-                            limit=JOIN_REQUEST_SCAN_LIMIT,
-                            requested=True,
-                        )
-                    )
-                except FloodWaitError as exc:  # pragma: no cover - network dependent
-                    self._register_user_flood(
-                        entry, float(getattr(exc, "seconds", 60) or 60),
-                        what="join request lookup",
-                    )
+        # Same bounded pool as claim_verdict: a caller that cannot be served
+        # right now must hear it at once (None = could not answer) and fall
+        # back, not pile onto the single shared user account.
+        if self._user_gate.locked():
+            return None
+
+        async with self._user_gate:
+            for entry in order:
+                if entry["cooldown_until"] > now:
                     continue
-                except Exception as exc:
-                    cls = type(exc).__name__
-                    if "FloodWait" in cls:
+                async with self._lock:
+                    await self._user_limiter.acquire()
+                    try:
+                        peer = await entry["client"].get_input_entity(chat_id)
+                        result = await entry["client"](
+                            GetChatInviteImportersRequest(
+                                peer=peer,
+                                offset_date=None,
+                                offset_user=InputUserEmpty(),
+                                limit=JOIN_REQUEST_SCAN_LIMIT,
+                                requested=True,
+                            )
+                        )
+                    except FloodWaitError as exc:  # pragma: no cover - network dependent
                         self._register_user_flood(
                             entry, float(getattr(exc, "seconds", 60) or 60),
                             what="join request lookup",
                         )
                         continue
-                    # Not an administrator, wrong chat id, chat has no request
-                    # queue - none of which may be read as "no request".
-                    logger.debug(
-                        "join request lookup(%s) via %s failed: %s",
-                        chat_id, entry["name"], exc,
-                    )
-                    return None
+                    except Exception as exc:
+                        cls = type(exc).__name__
+                        if "FloodWait" in cls:
+                            self._register_user_flood(
+                                entry, float(getattr(exc, "seconds", 60) or 60),
+                                what="join request lookup",
+                            )
+                            continue
+                        # Not an administrator, wrong chat id, chat has no request
+                        # queue - none of which may be read as "no request".
+                        logger.debug(
+                            "join request lookup(%s) via %s failed: %s",
+                            chat_id, entry["name"], exc,
+                        )
+                        return None
 
-                importers = getattr(result, "importers", None) or []
-                for importer in importers:
-                    if getattr(importer, "user_id", None) == user_id:
-                        return True
-                return False
-        return None
+                    importers = getattr(result, "importers", None) or []
+                    for importer in importers:
+                        if getattr(importer, "user_id", None) == user_id:
+                            return True
+                    return False
+            return None
 
     async def resolve_invite(self, invite_hash: str) -> int | None:
         """Turn a private ``t.me/+<hash>`` invite into a chat id, or ``None``.

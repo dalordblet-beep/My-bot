@@ -7,6 +7,8 @@ in-memory caches before every test.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 from aiogram import Bot, Dispatcher
@@ -27,7 +29,7 @@ from app.database.models import Base
 from app.services.access import access_guard
 from app.services.captcha import CaptchaService
 from app.services.runtime_config import runtime
-from app.telegram.mtproto import mtproto_client
+from app.telegram.mtproto import _USER_POOL_WAITERS, mtproto_client
 from app.telegram.username_checker import UsernameChecker
 from tests.mock_telegram import FakePageProbe, MockTelegramSession
 
@@ -252,6 +254,10 @@ async def clean_state(database, mock_session, captcha_service, dispatcher, page_
     mtproto_client._user_turn = 0
     mtproto_client._user_pace_multiplier = 1.0
     mtproto_client._user_last_flood_at = 0.0
+    # The user-pool gate is a process-wide semaphore. A test that saturates it
+    # (or a leaked zero-slot one) must not turn every later search into
+    # "pool_busy" - reset it to a fresh gate on the current event loop.
+    mtproto_client._user_gate = asyncio.Semaphore(_USER_POOL_WAITERS)
     yield
 
 

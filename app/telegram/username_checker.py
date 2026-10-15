@@ -40,6 +40,12 @@ shared_rate_limiter = RateLimiter(min_interval=settings.request_delay)
 # the Bot API is a different channel with its own quota, so an MTProto ban
 # must not freeze an account-free probe behind hours of someone else's wait.
 _BOT_API_ABSORB_PAUSE = 5.0
+# The Bot API answers "Too Many Requests" with a retry_after of its own. While
+# it is cooling down, getChat is not called at all: every call during the
+# window only extended the limit, and the public page still proves OCCUPIED
+# for free. One measured penalty: the log showed a getChat a second for
+# minutes, each returning flood_wait, because nothing told the callers to stop.
+_BOT_API_COOLDOWN = 30.0
 shared_flood_budget = FloodWaitBudget()
 
 
@@ -60,6 +66,8 @@ class UsernameChecker:
             occupied_ttl=settings.verdict_occupied_ttl,
             free_ttl=settings.verdict_free_ttl,
         )
+        # monotonic deadline until which the Bot API is left alone after a flood
+        self._bot_api_cooldown_until = 0.0
 
     @property
     def limiter(self) -> RateLimiter:
@@ -239,6 +247,15 @@ class UsernameChecker:
                 source="mtproto_user", reason="not_assignable",
             )
         if verdict.kind == "flood":
+            if verdict.detail == "pool_busy":
+                # The user session is a serial queue and it is saturated: every
+                # running search wants it at once. Do not parse a wait out of
+                # it - answer immediately and let the account-free path run
+                # instead of parking this caller behind the queue.
+                return CheckResult(
+                    username=name, status=CheckStatus.UNKNOWN, source="none",
+                    reason="user_pool_busy", detail="too_many_concurrent_checks",
+                )
             seconds = float(verdict.detail or 0) + settings.floodwait_safety_margin
             shared_flood_budget.record(seconds)
             # The verdict call is throttled. The account-free signals cost no
@@ -406,20 +423,30 @@ class UsernameChecker:
         # nothing to do with the Bot API.
         if self._limiter.paused_for <= _BOT_API_ABSORB_PAUSE:
             await self._limiter.acquire()
-        lookup = await lookup_chat(self._bot, f"@{name}")
 
-        if lookup.found:
-            return CheckResult(
-                username=name, status=CheckStatus.OCCUPIED, source="bot_api",
-                entity_type=lookup.chat_type, title=lookup.title,
-                detail="resolved_via_bot_api",
-            )
+        # Cooling down after its own "Too Many Requests": skip getChat entirely
+        # and let the public page answer. Calling it anyway only re-armed the
+        # limit.
+        cooling = self._bot_api_cooldown_until > time.monotonic()
+        lookup = None
+        if not cooling:
+            lookup = await lookup_chat(self._bot, f"@{name}")
 
-        if lookup.reason == "flood_wait":
-            return CheckResult(
-                username=name, status=CheckStatus.RATE_LIMITED, source="bot_api",
-                reason="flood_wait",
-            )
+            if lookup.found:
+                return CheckResult(
+                    username=name, status=CheckStatus.OCCUPIED, source="bot_api",
+                    entity_type=lookup.chat_type, title=lookup.title,
+                    detail="resolved_via_bot_api",
+                )
+            if lookup.reason == "flood_wait":
+                self._bot_api_cooldown_until = time.monotonic() + _BOT_API_COOLDOWN
+                logger.warning(
+                    "bot api flood wait - getChat not called for %.0fs", _BOT_API_COOLDOWN
+                )
+                return CheckResult(
+                    username=name, status=CheckStatus.RATE_LIMITED, source="bot_api",
+                    reason="flood_wait",
+                )
 
         # The Bot API only resolves channels, supergroups and bots. For a
         # username owned by a personal account it answers "chat not found",
@@ -460,7 +487,8 @@ class UsernameChecker:
 
         return CheckResult(
             username=name, status=CheckStatus.UNKNOWN, source="bot_api",
-            reason=page.reason or lookup.reason or "unavailable", detail=prior_reason,
+            reason=page.reason or (lookup.reason if lookup is not None else None) or "unavailable",
+            detail=prior_reason,
         )
 
     @staticmethod

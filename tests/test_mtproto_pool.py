@@ -544,3 +544,53 @@ async def test_fragment_returns_none_when_every_session_is_parked(monkeypatch):
     monkeypatch.setattr(client, "_fragment_limiter", RateLimiter(min_interval=0.0))
 
     assert await client.collectible_info("somename") is None
+
+
+# ----------------------------------------- the 210s flood: a bounded user gate
+async def test_saturated_user_pool_reports_busy_not_a_queue(monkeypatch):
+    """The user account is a serial queue. When every slot is taken, the next
+    caller must hear 'busy' at once and fall back - not join a queue that
+    stacked N searches behind one paced account and produced 210s waits.
+    """
+    client = mtproto_module.mtproto_client
+    monkeypatch.setattr(
+        client, "_user_clients", [_session("u", FakeClient(lambda r: True))], raising=False
+    )
+    # A zero-slot gate is already saturated - the real code hits this when
+    # _USER_POOL_WAITERS callers are inside at once. monkeypatch, not a raw
+    # assignment: mtproto_client is a process-wide singleton, and leaving a
+    # zero-slot gate behind made every later search answer "pool_busy".
+    monkeypatch.setattr(client, "_user_gate", asyncio.Semaphore(0), raising=False)
+
+    verdict = await client.claim_verdict("whatever")
+
+    assert verdict.kind == "flood"
+    assert verdict.detail == "pool_busy"
+
+
+async def test_user_pool_busy_does_not_crash_the_check(monkeypatch):
+    """The checker used to read the gate's 'pool_busy' tag as a wait time and
+    raise float('pool_busy'). Now it maps to an honest UNKNOWN so the caller
+    degrades to the account-free signals instead of dying on a crashed task.
+    """
+    client = mtproto_module.mtproto_client
+
+    async def busy(name):
+        return MtprotoResult("flood", "pool_busy")
+
+    monkeypatch.setattr(client, "claim_verdict", busy, raising=False)
+    monkeypatch.setattr(client, "_ready", True, raising=False)
+    monkeypatch.setattr(client, "_client", None, raising=False)
+    monkeypatch.setattr(settings, "allow_bot_api_availability", True)
+
+    checker = UsernameChecker(
+        cache=None, bot=_NoChatBot(), rate_limiter=RateLimiter(min_interval=0.0),
+        page_probe=FakePageProbe(state="unknown"),
+    )
+    # _claim_verdict is what the search-confirmation path calls for every
+    # surviving candidate. A saturated user pool must not take it down.
+    result = await checker._claim_verdict("somefree")
+
+    assert result.status is CheckStatus.UNKNOWN
+    assert result.reason == "user_pool_busy"
+    assert result.source == "none"
