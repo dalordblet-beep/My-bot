@@ -93,6 +93,24 @@ async def test_the_guard_sees_the_user_through_an_update_wrapper():
     assert len(handled) == 2
 
 
+async def test_the_in_flight_cap_stays_under_the_db_pool():
+    """The invariant that keeps the pool from exhausting.
+
+    Every update holds a database connection while its database work runs, and
+    the background services need connections too. If the guard allowed updates
+    to occupy the whole pool, the pool would run dry - which is precisely the
+    crash this guard exists to prevent ("QueuePool limit reached").
+    """
+    from app.bot.middlewares.flood import GLOBAL_MAX_IN_FLIGHT
+    from app.database.database import pool_capacity
+
+    capacity = pool_capacity()
+    assert GLOBAL_MAX_IN_FLIGHT < capacity
+    # At most half the pool for updates - the rest is headroom for background
+    # services and bursts, not a hair's breadth.
+    assert GLOBAL_MAX_IN_FLIGHT <= capacity // 2
+
+
 async def test_the_guard_bookkeeping_stays_bounded(monkeypatch):
     from app.bot.middlewares import flood as flood_module
 

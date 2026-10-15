@@ -23,6 +23,22 @@ logger = get_logger(__name__)
 _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
+# Connection pool sizing. Every concurrent update (and every background
+# service) holds one connection while its database work runs, so the total is
+# the hard ceiling on how much database work can overlap at once. The flood
+# guard keeps updates well under it - see app/bot/middlewares/flood.py.
+POOL_SIZE = 10
+MAX_OVERFLOW = 20
+# How long a caller waits for a free connection before giving up. Kept short:
+# under saturation, failing in ten seconds is better than hanging for thirty,
+# and the guard means this should never be reached in the first place.
+POOL_TIMEOUT = 10
+
+
+def pool_capacity() -> int:
+    """Total connections the pool can ever hand out."""
+    return POOL_SIZE + MAX_OVERFLOW
+
 
 def get_engine() -> AsyncEngine:
     global _engine
@@ -33,8 +49,9 @@ def get_engine() -> AsyncEngine:
             settings.database_url,
             echo=False,
             pool_pre_ping=True,
-            pool_size=10,
-            max_overflow=20,
+            pool_size=POOL_SIZE,
+            max_overflow=MAX_OVERFLOW,
+            pool_timeout=POOL_TIMEOUT,
             connect_args=connect_args,
         )
         if sqlite:

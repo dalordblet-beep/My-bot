@@ -28,6 +28,7 @@ from typing import Any, Awaitable, Callable
 from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
+from app.database.database import pool_capacity
 from app.services.i18n import DEFAULT_LANGUAGE, t
 from app.utils.logging_setup import get_logger
 
@@ -40,10 +41,19 @@ USER_MAX_PER_WINDOW = 6
 # Once over the budget, the user is ignored for this long. Long enough to blunt
 # a burst, short enough that an over-eager real user recovers on their own.
 MUTE_SECONDS = 20.0
-# The total number of updates allowed to be mid-handling at once. Kept modest:
-# each one holds a database session, and the whole point is that concurrency
-# can never grow with the flood.
-GLOBAL_MAX_IN_FLIGHT = 24
+# The total number of updates allowed to be mid-handling at once. This is the
+# number that keeps the bot alive: every update holds a database connection
+# while its database work runs, and the background services (trap watcher, name
+# stock, daily drop, db backup) need connections too. Exceed the pool and it
+# exhausts - exactly the crash we saw: "QueuePool limit of size 10 overflow 20
+# reached", after which every update waited 30 seconds for a connection that
+# never came. SQLite makes it worse, because writes serialise, so more
+# concurrency only makes each write hold its connection longer.
+#
+# So the cap is derived from the pool, not guessed: updates may use two fifths
+# of it, and a flood that tries to exceed that is shed here - before it can
+# touch the pool - rather than being allowed to take the process down.
+GLOBAL_MAX_IN_FLIGHT = max(4, pool_capacity() * 2 // 5)
 # Bookkeeping caps - the guard must not leak under a flood of distinct users.
 _MAX_TRACKED_USERS = 20_000
 
