@@ -447,6 +447,10 @@ EN: dict[str, str] = {
     "search.progress_checked": (
         "{bolt} Checked: <b>{n}</b> · confirmed <b>{c}</b> · {s}s"
     ),
+    "guard.too_fast": (
+        "{hourglass} <i>Slow down a moment - too many requests. "
+        "Try again in a few seconds.</i>"
+    ),
     "search.progress_title": "{search} <b>Searching for a free username…</b>",
     "search.progress_activity_screening": "{compass} <i>Scanning public pages…</i>",
     "search.progress_activity_confirming": "{gem} <i>Confirming availability…</i>",
@@ -1381,6 +1385,10 @@ RU: dict[str, str] = {
     ),
     "search.progress_checked": (
         "{bolt} Проверено: <b>{n}</b> · подтверждено <b>{c}</b> · {s}с"
+    ),
+    "guard.too_fast": (
+        "{hourglass} <i>Помедленнее — слишком много запросов. "
+        "Попробуйте через несколько секунд.</i>"
     ),
     "search.progress_title": "{search} <b>Ищу свободный юзернейм…</b>",
     "search.progress_activity_screening": "{compass} <i>Сканирую публичные страницы…</i>",

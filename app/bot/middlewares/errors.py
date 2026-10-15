@@ -38,15 +38,31 @@ class ErrorMiddleware(BaseMiddleware):
         return None
 
     @staticmethod
-    async def _notify(event: TelegramObject, data: dict[str, Any], text: str) -> None:
+    def _inner(event: TelegramObject) -> TelegramObject:
+        """Unwrap an ``Update`` to the message/callback it carries.
+
+        This middleware is registered at the update level, where aiogram hands
+        the ``Update`` wrapper, not the inner event - so without unwrapping, the
+        "something went wrong" notice was silently never sent.
+        """
+        if isinstance(event, (Message, CallbackQuery)):
+            return event
         try:
-            if isinstance(event, CallbackQuery):
-                await event.answer("Something went wrong", show_alert=False)
-                if isinstance(event.message, Message):
-                    await event.message.answer(text)
-                elif event.from_user is not None:
-                    await data["bot"].send_message(event.from_user.id, text)
-            elif isinstance(event, Message):
-                await event.answer(text)
+            return event.event  # type: ignore[attr-defined]
+        except Exception:
+            return event
+
+    @staticmethod
+    async def _notify(event: TelegramObject, data: dict[str, Any], text: str) -> None:
+        inner = ErrorMiddleware._inner(event)
+        try:
+            if isinstance(inner, CallbackQuery):
+                await inner.answer("Something went wrong", show_alert=False)
+                if isinstance(inner.message, Message):
+                    await inner.message.answer(text)
+                elif inner.from_user is not None:
+                    await data["bot"].send_message(inner.from_user.id, text)
+            elif isinstance(inner, Message):
+                await inner.answer(text)
         except Exception:
             pass

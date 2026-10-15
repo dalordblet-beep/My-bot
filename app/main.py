@@ -18,6 +18,7 @@ from app.bot.routers import all_routers
 from app.bot.middlewares.access_guard import AccessGuardMiddleware
 from app.bot.middlewares.database import DatabaseMiddleware, UserContextMiddleware
 from app.bot.middlewares.errors import ErrorMiddleware
+from app.bot.middlewares.flood import FloodGuardMiddleware
 from app.cache.redis_cache import CacheService
 from app.collectible.checker import CollectibleChecker
 from app.config import settings
@@ -62,6 +63,11 @@ def build_dispatcher(cache: CacheService, checker: UsernameChecker,
 
     # outer middlewares (first registered = outermost)
     dp.update.outer_middleware(ErrorMiddleware())
+    # Shed a flood before any real work - before the database session, before
+    # the membership lookup. Inside ErrorMiddleware, so a failure in the guard
+    # itself can never escape. A dropped message is always better than a
+    # dropped process.
+    dp.update.outer_middleware(FloodGuardMiddleware())
     dp.update.outer_middleware(DatabaseMiddleware())
     dp.update.outer_middleware(UserContextMiddleware())
 
@@ -219,11 +225,7 @@ async def run() -> None:
         except Exception as exc:
             logger.warning("could not drop webhook: %s", exc)
 
-        try:
-            await dp.start_polling(bot)
-        except TelegramUnauthorizedError:
-            logger.error("Telegram rejected BOT_TOKEN. Check it in .env.")
-            raise SystemExit(4)
+        await _poll_forever(dp, bot)
     finally:
         logger.info("shutting down")
         await search_queue.stop()
@@ -238,6 +240,34 @@ async def run() -> None:
         await cache.close()
         await dispose_db()
         await bot.session.close()
+
+
+async def _poll_forever(dp: Dispatcher, bot: Bot) -> None:
+    """Poll until told to stop, surviving anything short of a revoked token.
+
+    A single unexpected error used to end the process - a transient network
+    fault, or another process polling the same token (exactly what a leaked
+    token looks like from here: ``TelegramConflictError``) - and the bot then
+    stayed down until a human noticed. Instead: log it and come back with a
+    growing backoff. A bot that keeps trying is a bot that survives.
+    """
+    backoff = 5.0
+    while True:
+        try:
+            await dp.start_polling(bot)
+            return  # a clean stop (stop_polling) - nothing left to do
+        except TelegramUnauthorizedError:
+            logger.error("Telegram rejected BOT_TOKEN. Check it in .env.")
+            raise SystemExit(4)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the process must outlive it
+            logger.error(
+                "polling stopped unexpectedly (%s: %s) - retrying in %.0fs",
+                type(exc).__name__, exc, backoff,
+            )
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, 120.0)
 
 
 def main() -> None:

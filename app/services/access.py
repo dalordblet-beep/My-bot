@@ -82,6 +82,12 @@ class AccessState:
 class AccessGuard:
     """Evaluates access and caches membership lookups briefly."""
 
+    # Hard ceiling on remembered membership results. Entries already expire by
+    # TTL, but an unpruned dict still grows with every distinct user that ever
+    # passes the gate - a slow leak that a flood of throwaway accounts turns
+    # into a fast one.
+    _MEMBERSHIP_CACHE_MAX = 10_000
+
     def __init__(self) -> None:
         # user_id -> (monotonic_ts, {subscription_key: joined})
         self._membership_cache: dict[int, tuple[float, dict[str, bool]]] = {}
@@ -216,7 +222,31 @@ class AccessGuard:
             await session.flush()
 
         self._membership_cache[user.telegram_id] = (now, results)
+        self._prune_membership_cache(now)
         return results
+
+    def _prune_membership_cache(self, now: float) -> None:
+        """Keep the cache bounded when a burst of distinct users arrives.
+
+        Expired entries go first; if fresh users alone still overflow the cap,
+        the oldest are dropped - a membership re-check costs one Telegram call,
+        unbounded memory costs the whole process.
+        """
+        if len(self._membership_cache) <= self._MEMBERSHIP_CACHE_MAX:
+            return
+        ttl = settings.membership_recheck_ttl
+        stale = [
+            uid for uid, (ts, _) in self._membership_cache.items() if now - ts >= ttl
+        ]
+        for uid in stale:
+            self._membership_cache.pop(uid, None)
+        overflow = len(self._membership_cache) - self._MEMBERSHIP_CACHE_MAX
+        if overflow > 0:
+            oldest = sorted(
+                self._membership_cache.items(), key=lambda item: item[1][0]
+            )[:overflow]
+            for uid, _ in oldest:
+                self._membership_cache.pop(uid, None)
 
     async def join_request_pending(
         self, session: AsyncSession, bot: Bot, sub: RequiredSub, user: User

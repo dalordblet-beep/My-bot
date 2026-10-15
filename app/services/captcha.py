@@ -78,6 +78,11 @@ class CaptchaOutcome:
 class CaptchaService:
     """Generates and verifies challenges. Answers stay on this side."""
 
+    # Hard ceiling on in-process challenges. Nothing evicted them before, so a
+    # flood of throwaway accounts (each /start mints a challenge) grew this dict
+    # without bound - a slow leak an attacker can turn into an OOM.
+    _MEMORY_MAX = 5_000
+
     def __init__(self, cache: CacheService | None = None) -> None:
         self._cache = cache
         self._memory: dict[int, CaptchaChallenge] = {}
@@ -254,6 +259,8 @@ class CaptchaService:
 
     def _store(self, user_id: int, challenge: CaptchaChallenge) -> None:
         self._memory[user_id] = challenge
+        if len(self._memory) > self._MEMORY_MAX:
+            self._prune_memory()
         if self._cache is not None and self._cache.available:
             import asyncio
 
@@ -271,3 +278,28 @@ class CaptchaService:
 
     def _load(self, user_id: int) -> CaptchaChallenge | None:
         return self._memory.get(user_id)
+
+    def _prune_memory(self) -> None:
+        """Evict finished/expired challenges, then the oldest, when over cap.
+
+        Evicting a *passed* challenge is safe: whether a user has cleared the
+        captcha is decided from ``captcha_verified_at`` in the database, not
+        from this dict - it only holds the in-flight challenge.
+        """
+        now = time.time()
+        stale = [
+            uid
+            for uid, challenge in self._memory.items()
+            if challenge.expires_at < now
+            or challenge.state in (STATE_PASSED, STATE_FAILED, STATE_EXPIRED)
+        ]
+        for uid in stale:
+            self._memory.pop(uid, None)
+
+        overflow = len(self._memory) - self._MEMORY_MAX
+        if overflow > 0:
+            oldest = sorted(
+                self._memory.items(), key=lambda item: item[1].expires_at
+            )[:overflow]
+            for uid, _ in oldest:
+                self._memory.pop(uid, None)
